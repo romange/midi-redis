@@ -87,7 +87,7 @@ template <typename U> void EngineShardSet::RunBriefInParallel(U&& func) {
 
   for (uint32_t i = 0; i < size(); ++i) {
     util::ProactorBase* dest = pp_->at(i);
-    dest->AsyncBrief([f = std::forward<U>(func), bc]() mutable {
+    dest->DispatchBrief([f = std::forward<U>(func), bc]() mutable {
       f(EngineShard::tlocal());
       bc.Dec();
     });

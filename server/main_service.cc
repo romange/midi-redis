@@ -35,7 +35,7 @@ DEFINE_VARZ(VarzMapAverage, request_latency_usec);
 DEFINE_VARZ(VarzQps, ping_qps);
 DEFINE_VARZ(VarzQps, set_qps);
 
-std::optional<VarzFunction> engine_varz;
+optional<VarzFunction> engine_varz;
 metrics::CounterFamily cmd_req("requests_total", "Number of served redis requests");
 
 }  // namespace
@@ -53,7 +53,7 @@ void Service::Init(util::AcceptServer* acceptor) {
   uint32_t shard_num = pp_.size() > 1 ? pp_.size() - 1 : pp_.size();
   shard_set_.Init(shard_num);
 
-  pp_.AwaitOnAll([&](uint32_t index, ProactorBase* pb) {
+  pp_.Await([&](uint32_t index, ProactorBase* pb) {
     if (index < shard_count()) {
       shard_set_.InitThreadLocal(index);
     }
