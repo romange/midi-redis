@@ -6,19 +6,23 @@
 
 #include <openssl/ssl.h>
 
+#include "base/flags.h"
 #include "base/logging.h"
-#include "server/config_flags.h"
 #include "server/dragonfly_connection.h"
 #include "util/proactor_pool.h"
 
-DEFINE_uint32(conn_threads, 0, "Number of threads used for handing server connections");
-DEFINE_bool(tls, false, "");
-DEFINE_bool(conn_use_incoming_cpu, false,
+using namespace std;
+
+ABSL_FLAG(uint32_t, conn_threads, 0, "Number of threads used for handing server connections");
+ABSL_FLAG(bool, tls, false, "");
+ABSL_FLAG(bool, conn_use_incoming_cpu, false,
             "If true uses incoming cpu of a socket in order to distribute"
             " incoming connections");
 
-CONFIG_string(tls_client_cert_file, "", "", TrueValidator);
-CONFIG_string(tls_client_key_file, "", "", TrueValidator);
+ABSL_FLAG(string, tls_client_cert_file, "", "");
+ABSL_FLAG(string, tls_client_key_file, "", "");
+
+using absl::GetFlag;
 
 enum TlsClientAuth {
   CL_AUTH_NO = 0,
@@ -26,26 +30,16 @@ enum TlsClientAuth {
   CL_AUTH_OPTIONAL = 2,
 };
 
-dfly::ConfigEnum tls_auth_clients_enum[] = {
-    {"no", CL_AUTH_NO},
-    {"yes", CL_AUTH_YES},
-    {"optional", CL_AUTH_OPTIONAL},
-};
-
-static int tls_auth_clients_opt = CL_AUTH_YES;
-
-CONFIG_enum(tls_auth_clients, "yes", "", tls_auth_clients_enum, tls_auth_clients_opt);
 
 namespace dfly {
 
 using namespace util;
-using namespace std;
 
 // To connect: openssl s_client  -cipher "ADH:@SECLEVEL=0" -state -crlf  -connect 127.0.0.1:6380
 static SSL_CTX* CreateSslCntx() {
   SSL_CTX* ctx = SSL_CTX_new(TLS_server_method());
 
-  if (FLAGS_tls_client_key_file.empty()) {
+  if (GetFlag(FLAGS_tls_client_key_file).empty()) {
     // To connect - use openssl s_client -cipher with either:
     // "AECDH:@SECLEVEL=0" or "ADH:@SECLEVEL=0" setting.
     CHECK_EQ(1, SSL_CTX_set_cipher_list(ctx, "aNULL"));
@@ -59,14 +53,17 @@ static SSL_CTX* CreateSslCntx() {
         << "tls-client-key-file not set, no keys are loaded and anonymous ciphers are enabled. "
         << "Do not use in production!";
   } else {  // tls_client_key_file is set.
+    auto key_file = GetFlag(FLAGS_tls_client_key_file);
     CHECK_EQ(1,
-             SSL_CTX_use_PrivateKey_file(ctx, FLAGS_tls_client_key_file.c_str(), SSL_FILETYPE_PEM));
+             SSL_CTX_use_PrivateKey_file(ctx, key_file.c_str(), SSL_FILETYPE_PEM));
 
-    if (!FLAGS_tls_client_cert_file.empty()) {
+    auto cert_file = GetFlag(FLAGS_tls_client_cert_file);
+
+    if (!cert_file.empty()) {
       // TO connect with redis-cli you need both tls-client-key-file and tls-client-cert-file
       // loaded. Use `redis-cli --tls -p 6380 --insecure  PING` to test
 
-      CHECK_EQ(1, SSL_CTX_use_certificate_chain_file(ctx, FLAGS_tls_client_cert_file.c_str()));
+      CHECK_EQ(1, SSL_CTX_use_certificate_chain_file(ctx, cert_file.c_str()));
     }
     CHECK_EQ(1, SSL_CTX_set_cipher_list(ctx, "DEFAULT"));
   }
@@ -86,7 +83,7 @@ static SSL_CTX* CreateSslCntx() {
 }
 
 Listener::Listener(Protocol protocol, Service* e) : engine_(e), protocol_(protocol) {
-  if (FLAGS_tls) {
+  if (GetFlag(FLAGS_tls)) {
     OPENSSL_init_ssl(OPENSSL_INIT_SSL_DEFAULT, NULL);
     ctx_ = CreateSslCntx();
   }
@@ -109,14 +106,14 @@ void Listener::PostShutdown() {
 // We can limit number of threads handling dragonfly connections.
 ProactorBase* Listener::PickConnectionProactor(LinuxSocketBase* sock) {
   util::ProactorPool* pp = pool();
-  uint32_t total = FLAGS_conn_threads;
+  uint32_t total = GetFlag(FLAGS_conn_threads);
   uint32_t id = kuint32max;
 
   if (total == 0 || total > pp->size()) {
     total = pp->size();
   }
 
-  if (FLAGS_conn_use_incoming_cpu) {
+  if (GetFlag(FLAGS_conn_use_incoming_cpu)) {
     int fd = sock->native_handle();
 
     int cpu, napi_id;

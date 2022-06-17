@@ -9,11 +9,12 @@
 #include "util/uring/uring_pool.h"
 #include "util/varz.h"
 
-DEFINE_int32(http_port, 8080, "Http port.");
-DECLARE_uint32(port);
-DECLARE_uint32(memcache_port);
+ABSL_FLAG(int32_t, http_port, 8080, "Http port.");
+ABSL_DECLARE_FLAG(uint32_t, port);
+ABSL_DECLARE_FLAG(uint32_t, memcache_port);
 
 using namespace util;
+using absl::GetFlag;
 
 namespace dfly {
 
@@ -25,9 +26,10 @@ void RunEngine(ProactorPool* pool, AcceptServer* acceptor, HttpListener<>* http)
     service.RegisterHttp(http);
   }
 
-  acceptor->AddListener(FLAGS_port, new Listener{Protocol::REDIS, &service});
-  if (FLAGS_memcache_port > 0) {
-    acceptor->AddListener(FLAGS_memcache_port, new Listener{Protocol::MEMCACHE, &service});
+  acceptor->AddListener(GetFlag(FLAGS_port), new Listener{Protocol::REDIS, &service});
+  auto mc_port = GetFlag(FLAGS_memcache_port);
+  if (mc_port > 0) {
+    acceptor->AddListener(mc_port, new Listener{Protocol::MEMCACHE, &service});
   }
 
   acceptor->Run();
@@ -42,7 +44,7 @@ void RunEngine(ProactorPool* pool, AcceptServer* acceptor, HttpListener<>* http)
 int main(int argc, char* argv[]) {
   MainInitGuard guard(&argc, &argv);
 
-  CHECK_GT(FLAGS_port, 0u);
+  CHECK_GT(GetFlag(FLAGS_port), 0u);
 
   uring::UringPool pp{1024};
   pp.Run();
@@ -50,12 +52,12 @@ int main(int argc, char* argv[]) {
   AcceptServer acceptor(&pp);
   HttpListener<>* http_listener = nullptr;
 
-  if (FLAGS_http_port >= 0) {
+  if (GetFlag(FLAGS_http_port) >= 0) {
     http_listener = new HttpListener<>;
     http_listener->enable_metrics();
 
     // Ownership over http_listener is moved to the acceptor.
-    uint16_t port = acceptor.AddListener(FLAGS_http_port, http_listener);
+    uint16_t port = acceptor.AddListener(GetFlag(FLAGS_http_port), http_listener);
 
     LOG(INFO) << "Started http service on port " << port;
   }

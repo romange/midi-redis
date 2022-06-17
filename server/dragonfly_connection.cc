@@ -110,9 +110,11 @@ void Connection::UnregisterShutdownHook(ShutdownHandle id) {
 void Connection::HandleRequests() {
   this_fiber::properties<FiberProps>().set_name("DflyConnection");
 
-  int val = 1;
-  CHECK_EQ(0, setsockopt(socket_->native_handle(), SOL_TCP, TCP_NODELAY, &val, sizeof(val)));
-  auto ep = socket_->RemoteEndpoint();
+  LinuxSocketBase* lsb = static_cast<LinuxSocketBase*>(socket_.get());
+  // int val = 1;
+  // CHECK_EQ(0, setsockopt(socket_->native_handle(), SOL_TCP, TCP_NODELAY, &val, sizeof(val)));
+
+  auto ep = lsb->RemoteEndpoint();
 
   std::unique_ptr<tls::TlsSocket> tls_sock;
   if (ctx_) {

@@ -25,3 +25,4 @@ include_directories(helio)
 
 add_subdirectory(helio)
 add_subdirectory(server)
+add_subdirectory(string_set)

@@ -11,14 +11,15 @@
 #include <filesystem>
 
 #include "base/logging.h"
+#include "base/flags.h"
 #include "server/conn_context.h"
 #include "server/debugcmd.h"
 #include "util/metrics/metrics.h"
 #include "util/uring/uring_fiber_algo.h"
 #include "util/varz.h"
 
-DEFINE_uint32(port, 6380, "Redis port");
-DEFINE_uint32(memcache_port, 0, "Memcached port");
+ABSL_FLAG(uint32_t, port, 6380, "Redis port");
+ABSL_FLAG(uint32_t, memcache_port, 0, "Memcached port");
 
 namespace dfly {
 
