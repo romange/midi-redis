@@ -53,7 +53,7 @@ class Connection : public util::Connection {
   std::unique_ptr<MemcacheParser> memcache_parser_;
   Service* service_;
   SSL_CTX* ctx_;
-  std::unique_ptr<ConnectionContext> cc_;
+  std::shared_ptr<ConnectionContext> cc_;
 
   struct Request {
     absl::FixedArray<MutableStrSpan> args;

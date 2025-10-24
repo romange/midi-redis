@@ -4,8 +4,8 @@
 
 #pragma once
 
-#include "server/reply_builder.h"
 #include "server/common_types.h"
+#include "server/reply_builder.h"
 
 namespace dfly {
 
@@ -13,7 +13,8 @@ class Connection;
 class EngineShardSet;
 class CommandId;
 
-class ConnectionContext : public ReplyBuilder {
+class ConnectionContext : public ReplyBuilder,
+                          public std::enable_shared_from_this<ConnectionContext> {
  public:
   ConnectionContext(::io::Sink* stream, Connection* owner);
 
