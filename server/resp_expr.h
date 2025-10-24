@@ -7,6 +7,7 @@
 #include <absl/strings/ascii.h>
 #include <absl/types/span.h>
 
+#include <cstdint>
 #include <variant>
 #include <vector>
 
@@ -31,7 +32,9 @@ class RespExpr {
     return Buffer{reinterpret_cast<uint8_t*>(s->data()), s->size()};
   }
 
-  Buffer GetBuf() const { return std::get<Buffer>(u); }
+  Buffer GetBuf() const {
+    return std::get<Buffer>(u);
+  }
 
   static const char* TypeName(Type t);
 };

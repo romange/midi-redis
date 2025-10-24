@@ -3,7 +3,7 @@
 //
 #include <string_view>
 
-#include "io/sync_stream_interface.h"
+#include "io/io.h"
 #include "server/dfly_protocol.h"
 #include "server/op_status.h"
 

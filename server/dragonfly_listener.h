@@ -19,8 +19,8 @@ class Listener : public util::ListenerInterface {
   ~Listener();
 
  private:
-  util::Connection* NewConnection(util::ProactorBase* proactor) final;
-  util::ProactorBase* PickConnectionProactor(util::LinuxSocketBase* sock) final;
+  util::Connection* NewConnection(util::fb2::ProactorBase* proactor) final;
+  util::fb2::ProactorBase* PickConnectionProactor(util::FiberSocketBase* sock) final;
 
   void PreShutdown();
 

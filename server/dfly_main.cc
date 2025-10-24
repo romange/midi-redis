@@ -6,7 +6,7 @@
 #include "server/main_service.h"
 #include "server/dragonfly_listener.h"
 #include "util/accept_server.h"
-#include "util/uring/uring_pool.h"
+#include "util/fibers/pool.h"
 #include "util/varz.h"
 
 ABSL_FLAG(int32_t, http_port, 8080, "Http port.");
@@ -14,6 +14,7 @@ ABSL_DECLARE_FLAG(uint32_t, port);
 ABSL_DECLARE_FLAG(uint32_t, memcache_port);
 
 using namespace util;
+using namespace std;
 using absl::GetFlag;
 
 namespace dfly {
@@ -46,10 +47,12 @@ int main(int argc, char* argv[]) {
 
   CHECK_GT(GetFlag(FLAGS_port), 0u);
 
-  uring::UringPool pp{1024};
-  pp.Run();
+  unique_ptr<ProactorPool> pp;
+  pp.reset(fb2::Pool::IOUring(256));
 
-  AcceptServer acceptor(&pp);
+  pp->Run();
+
+  AcceptServer acceptor(pp.get());
   HttpListener<>* http_listener = nullptr;
 
   if (GetFlag(FLAGS_http_port) >= 0) {
@@ -62,9 +65,9 @@ int main(int argc, char* argv[]) {
     LOG(INFO) << "Started http service on port " << port;
   }
 
-  dfly::RunEngine(&pp, &acceptor, http_listener);
+  dfly::RunEngine(pp.get(), &acceptor, http_listener);
 
-  pp.Stop();
+  pp->Stop();
 
   return 0;
 }

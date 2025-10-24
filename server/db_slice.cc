@@ -9,8 +9,8 @@
 
 #include "base/logging.h"
 #include "server/engine_shard_set.h"
-#include "util/fiber_sched_algo.h"
-#include "util/proactor_base.h"
+// #include "util/fiber_sched_algo.h"
+// #include "util/proactor_base.h"
 
 namespace dfly {
 

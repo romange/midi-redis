@@ -15,13 +15,11 @@
 #include "server/main_service.h"
 #include "server/memcache_parser.h"
 #include "server/redis_parser.h"
-#include "util/fiber_sched_algo.h"
+#include "util/fibers/fibers.h"
 #include "util/tls/tls_socket.h"
 
 using namespace util;
 using namespace std;
-namespace this_fiber = boost::this_fiber;
-namespace fibers = boost::fibers;
 
 namespace dfly {
 namespace {
@@ -35,9 +33,9 @@ void SendProtocolError(RedisParser::Result pres, FiberSocketBase* peer) {
     res.append("invalid multibulk length\r\n");
   }
 
-  auto size_res = peer->Send(::io::Buffer(res));
+  error_code size_res = peer->Write(::io::Buffer(res));
   if (!size_res) {
-    LOG(WARNING) << "Error " << size_res.error();
+    LOG(WARNING) << "Error " << size_res;
   }
 }
 
@@ -51,20 +49,6 @@ void RespToArgList(const RespVec& src, CmdArgVec* dest) {
 constexpr size_t kMinReadSize = 256;
 
 }  // namespace
-
-struct Connection::Shutdown {
-  absl::flat_hash_map<ShutdownHandle, ShutdownCb> map;
-  ShutdownHandle next_handle = 1;
-
-  ShutdownHandle Add(ShutdownCb cb) {
-    map[next_handle] = move(cb);
-    return next_handle++;
-  }
-
-  void Remove(ShutdownHandle sh) {
-    map.erase(sh);
-  }
-};
 
 Connection::Connection(Protocol protocol, Service* service, SSL_CTX* ctx)
     : service_(service), ctx_(ctx) {
@@ -85,30 +69,10 @@ Connection::~Connection() {
 
 void Connection::OnShutdown() {
   VLOG(1) << "Connection::OnShutdown";
-  if (shutdown_) {
-    for (const auto& k_v : shutdown_->map) {
-      k_v.second();
-    }
-  }
-}
-
-auto Connection::RegisterShutdownHook(ShutdownCb cb) -> ShutdownHandle {
-  if (!shutdown_) {
-    shutdown_ = make_unique<Shutdown>();
-  }
-  return shutdown_->Add(std::move(cb));
-}
-
-void Connection::UnregisterShutdownHook(ShutdownHandle id) {
-  if (shutdown_) {
-    shutdown_->Remove(id);
-    if (shutdown_->map.empty())
-      shutdown_.reset();
-  }
 }
 
 void Connection::HandleRequests() {
-  this_fiber::properties<FiberProps>().set_name("DflyConnection");
+  util::ThisFiber::SetName("DflyConnection");
 
   LinuxSocketBase* lsb = static_cast<LinuxSocketBase*>(socket_.get());
   // int val = 1;
@@ -140,7 +104,7 @@ void Connection::HandleRequests() {
 void Connection::InputLoop(FiberSocketBase* peer) {
   base::IoBuf io_buf{kMinReadSize};
 
-  auto dispatch_fb = fibers::fiber(fibers::launch::dispatch, [&] { DispatchFiber(peer); });
+  auto dispatch_fb = fb2::Fiber(fb2::Launch::dispatch, [&] { DispatchFiber(peer); });
   ParserStatus status = OK;
   std::error_code ec;
 
@@ -172,7 +136,7 @@ void Connection::InputLoop(FiberSocketBase* peer) {
 
   cc_->conn_state.mask |= ConnectionState::CONN_CLOSING;  // Signal dispatch to close.
   evc_.notify();
-  dispatch_fb.join();
+  dispatch_fb.Join();
 
   if (cc_->ec()) {
     ec = cc_->ec();
@@ -183,10 +147,10 @@ void Connection::InputLoop(FiberSocketBase* peer) {
         SendProtocolError(RedisParser::Result(parser_error_), peer);
       } else {
         string_view sv{"CLIENT_ERROR bad command line format\r\n"};
-        auto size_res = peer->Send(::io::Buffer(sv));
+        std::error_code size_res = peer->Write(::io::Buffer(sv));
         if (!size_res) {
-          LOG(WARNING) << "Error " << size_res.error();
-          ec = size_res.error();
+          LOG(WARNING) << "Error " << size_res;
+          ec = size_res;
         }
       }
     }
@@ -228,7 +192,7 @@ auto Connection::ParseRedis(base::IoBuf* io_buf) -> ParserStatus {
         if (dispatch_q_.size() == 1) {
           evc_.notify();
         } else if (dispatch_q_.size() > 10) {
-          this_fiber::yield();
+          ThisFiber::Yield();
         }
       }
     }
@@ -297,7 +261,7 @@ auto Connection::ParseMemcache(base::IoBuf* io_buf) -> ParserStatus {
 // into the dispatch queue and DispatchFiber will run those commands asynchronously with InputLoop.
 // Note: in some cases, InputLoop may decide to dispatch directly and bypass the DispatchFiber.
 void Connection::DispatchFiber(util::FiberSocketBase* peer) {
-  this_fiber::properties<FiberProps>().set_name("DispatchFiber");
+  ThisFiber::SetName("DispatchFiber");
 
   while (!cc_->ec()) {
     evc_.await([this] { return cc_->conn_state.IsClosing() || !dispatch_q_.empty(); });

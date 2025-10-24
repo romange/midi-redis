@@ -7,9 +7,6 @@
 #include "server/common_types.h"
 #include "server/op_status.h"
 
-namespace util {
-class ProactorBase;
-}
 
 namespace dfly {
 

@@ -4,30 +4,30 @@
 
 #include "server/engine_shard_set.h"
 
+#include <absl/strings/str_cat.h>
 #include "base/logging.h"
-#include "util/fiber_sched_algo.h"
+
+// #include "util/fiber_sched_algo.h"
 #include "util/varz.h"
 
 namespace dfly {
 
 using namespace std;
-using namespace boost;
-using util::FiberProps;
+using namespace util;
 
 thread_local EngineShard* EngineShard::shard_ = nullptr;
 constexpr size_t kQueueLen = 64;
 
 EngineShard::EngineShard(ShardId index)
     : db_slice(index, this), queue_(kQueueLen) {
-  fiber_q_ = fibers::fiber([this, index] {
-    this_fiber::properties<FiberProps>().set_name(absl::StrCat("shard_queue", index));
+  fiber_q_ = fb2::Fiber(absl::StrCat("shard_queue", index), [this] {
     queue_.Run();
   });
 }
 
 EngineShard::~EngineShard() {
   queue_.Shutdown();
-  fiber_q_.join();
+  fiber_q_.Join();
 }
 
 void EngineShard::InitThreadLocal(ShardId index) {

@@ -10,7 +10,7 @@
 
 namespace dfly {
 
-using namespace boost;
+using namespace util;
 using namespace std;
 
 static const char kUintErr[] = "value is out of range, must be positive";
@@ -98,8 +98,7 @@ void DebugCmd::Populate(CmdArgList args) {
   }
   ranges.emplace_back(from, total_count - from);
 
-  auto distribute_cb = [this, val_size, prefix](
-                           uint64_t from, uint64_t len) {
+  auto distribute_cb = [this, val_size, prefix](uint64_t from, uint64_t len) {
     string key = absl::StrCat(prefix, ":");
     size_t prefsize = key.size();
     std::vector<PopulateBatch> ps(ess_->size(), PopulateBatch{});
@@ -115,7 +114,7 @@ void DebugCmd::Populate(CmdArgList args) {
         ess_->Add(sid, [=, p = pops] {
           DoPopulateBatch(prefix, val_size, p);
           if (i % 100 == 0) {
-            this_fiber::yield();
+            util::ThisFiber::Yield();
           }
         });
 
@@ -127,12 +126,13 @@ void DebugCmd::Populate(CmdArgList args) {
     ess_->RunBriefInParallel(
         [&](EngineShard* shard) { DoPopulateBatch(prefix, val_size, ps[shard->shard_id()]); });
   };
-  vector<fibers::fiber> fb_arr(ranges.size());
+  vector<fb2::Fiber> fb_arr(ranges.size());
   for (size_t i = 0; i < ranges.size(); ++i) {
-    fb_arr[i] = ess_->pool()->at(i)->LaunchFiber(distribute_cb, ranges[i].first, ranges[i].second);
+    fb_arr[i] = ess_->pool()->at(i)->LaunchFiber(fb2::Launch::dispatch, "populate", distribute_cb,
+                                                 ranges[i].first, ranges[i].second);
   }
   for (auto& fb : fb_arr)
-    fb.join();
+    fb.Join();
 
   cntx_->SendOk();
 }

@@ -5,7 +5,6 @@
 #pragma once
 
 #include "server/db_slice.h"
-#include "util/fibers/fibers_ext.h"
 #include "util/fibers/fiberqueue_threadpool.h"
 #include "util/proactor_pool.h"
 
@@ -31,15 +30,15 @@ class EngineShard {
     return db_slice.shard_id();
   }
 
-  ::util::fibers_ext::FiberQueue* GetQueue() {
+  ::util::fb2::FiberQueue* GetQueue() {
     return &queue_;
   }
 
  private:
   EngineShard(ShardId index);
 
-  ::util::fibers_ext::FiberQueue queue_;
-  ::boost::fibers::fiber fiber_q_;
+  ::util::fb2::FiberQueue queue_;
+  ::util::fb2::Fiber fiber_q_;
 
   static thread_local EngineShard* shard_;
 };
@@ -73,7 +72,7 @@ class EngineShardSet {
 
  private:
   util::ProactorPool* pp_;
-  std::vector<util::fibers_ext::FiberQueue*> shard_queue_;
+  std::vector<util::fb2::FiberQueue*> shard_queue_;
 };
 
 /**
@@ -83,16 +82,16 @@ class EngineShardSet {
  * @param func
  */
 template <typename U> void EngineShardSet::RunBriefInParallel(U&& func) {
-  util::fibers_ext::BlockingCounter bc{size()};
+  util::fb2::BlockingCounter bc{size()};
 
   for (uint32_t i = 0; i < size(); ++i) {
     util::ProactorBase* dest = pp_->at(i);
     dest->DispatchBrief([f = std::forward<U>(func), bc]() mutable {
       f(EngineShard::tlocal());
-      bc.Dec();
+      bc->Dec();
     });
   }
-  bc.Wait();
+  bc->Wait();
 }
 
 }  // namespace dfly

@@ -13,7 +13,7 @@
 #include "server/dfly_protocol.h"
 #include "server/resp_expr.h"
 #include "util/connection.h"
-#include "util/fibers/event_count.h"
+#include "util/fibers/synchronization.h"
 
 typedef struct ssl_ctx_st SSL_CTX;
 
@@ -30,11 +30,6 @@ class Connection : public util::Connection {
   ~Connection();
 
   using error_code = std::error_code;
-  using ShutdownCb = std::function<void()>;
-  using ShutdownHandle = unsigned;
-
-  ShutdownHandle RegisterShutdownHook(ShutdownCb cb);
-  void UnregisterShutdownHook(ShutdownHandle id);
 
   Protocol protocol() const {
     return protocol_;
@@ -72,11 +67,9 @@ class Connection : public util::Connection {
   static Request* FromArgs(RespVec args);
 
   std::deque<Request*> dispatch_q_;  // coordinated via evc_.
-  util::fibers_ext::EventCount evc_;
+  util::fb2::EventCount evc_;
   unsigned parser_error_ = 0;
   Protocol protocol_;
-  struct Shutdown;
-  std::unique_ptr<Shutdown> shutdown_;
 };
 
 }  // namespace dfly
