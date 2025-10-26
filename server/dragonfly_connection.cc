@@ -98,6 +98,10 @@ void Connection::HandleRequests() {
 
   InputLoop(peer);
 
+  while (cc_->conn_state.pending_requests.load(std::memory_order_relaxed) > 0) {
+    ThisFiber::Yield();
+  }
+
   VLOG(1) << "Closed connection for peer " << ep;
 }
 

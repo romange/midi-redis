@@ -8,10 +8,11 @@
 #include <absl/strings/str_cat.h>
 #include <xxhash.h>
 
-#include "base/logging.h"
 #include "base/flags.h"
+#include "base/logging.h"
 #include "server/conn_context.h"
 #include "server/debugcmd.h"
+#include "server/dragonfly_connection.h"
 #include "util/metrics/metrics.h"
 #include "util/varz.h"
 
@@ -54,7 +55,7 @@ void Service::Shutdown() {
   VLOG(1) << "Service::Shutdown";
 
   engine_varz.reset();
-  for (unsigned i = 0; i <shard_set_.size(); ++i) {
+  for (unsigned i = 0; i < shard_set_.size(); ++i) {
     shard_set_.pool()->at(i)->Await([&] { EngineShard::DestroyThreadLocal(); });
   }
 }
@@ -144,18 +145,24 @@ void Service::Ping(CmdArgList args, ConnectionContext* cntx) {
 }
 
 void Service::Set(CmdArgList args, ConnectionContext* cntx) {
-  string_view key = ArgS(args, 1);
-  string_view val = ArgS(args, 2);
+  string key{ArgS(args, 1)};
+  string val{ArgS(args, 2)};
   VLOG(2) << "Set " << key << " " << val;
 
   ShardId sid = Shard(key, shard_count());
-  shard_set_.Await(sid, [&] {
+
+  // TODO: send stored only after the operation is complete from the sid thread back here.
+  fb2::ProactorBase* pb = fb2::ProactorBase::me();
+  cntx->conn_state.pending_requests.fetch_add(1, std::memory_order_relaxed);
+  auto cb = [pb, key = std::move(key), val = std::move(val), conn = cntx]() {
     EngineShard* es = EngineShard::tlocal();
     auto [it, res] = es->db_slice.AddOrFind(0, key);
     it->second = val;
-  });
 
-  cntx->SendStored();
+    // Support foreign thread writes.
+    conn->ForeignSendStored();
+  };
+  shard_set_.Add(sid, cb);
 }
 
 void Service::Get(CmdArgList args, ConnectionContext* cntx) {

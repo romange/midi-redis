@@ -1,2 +1,6 @@
+Diagnostics:
+  UnusedIncludes: None
+  MissingIncludes: None
+  
 CompileFlags:
   CompilationDatabase: build-dbg/       # Search for compile_commands.json

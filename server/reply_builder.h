@@ -6,12 +6,13 @@
 #include "io/io.h"
 #include "server/dfly_protocol.h"
 #include "server/op_status.h"
+#include "util/fiber_socket_base.h"
 
 namespace dfly {
 
 class BaseSerializer {
  public:
-  explicit BaseSerializer(::io::Sink* sink);
+  explicit BaseSerializer(util::FiberSocketBase* sink);
 
   std::error_code ec() const {
     return ec_;
@@ -35,7 +36,7 @@ class BaseSerializer {
   void Send(const iovec* v, uint32_t len);
 
  private:
-  ::io::Sink* sink_;
+  util::FiberSocketBase* sink_;
   std::error_code ec_;
   std::string batch_;
 
@@ -44,7 +45,7 @@ class BaseSerializer {
 
 class RespSerializer : public BaseSerializer {
  public:
-  RespSerializer(::io::Sink* sink) : BaseSerializer(sink) {
+  RespSerializer(util::FiberSocketBase* sink) : BaseSerializer(sink) {
   }
 
   //! See https://redis.io/topics/protocol
@@ -57,7 +58,7 @@ class RespSerializer : public BaseSerializer {
 
 class MemcacheSerializer : public BaseSerializer {
  public:
-  explicit MemcacheSerializer(::io::Sink* sink) : BaseSerializer(sink) {
+  explicit MemcacheSerializer(util::FiberSocketBase* sink) : BaseSerializer(sink) {
   }
 
   void SendStored();
@@ -66,7 +67,7 @@ class MemcacheSerializer : public BaseSerializer {
 
 class ReplyBuilder {
  public:
-  ReplyBuilder(Protocol protocol, ::io::Sink* stream);
+  ReplyBuilder(Protocol protocol, util::FiberSocketBase* stream);
 
   void SendStored();
 

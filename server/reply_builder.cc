@@ -26,7 +26,7 @@ constexpr char kSimplePref[] = "+";
 
 }  // namespace
 
-BaseSerializer::BaseSerializer(io::Sink* sink) : sink_(sink) {
+BaseSerializer::BaseSerializer(util::FiberSocketBase* sink) : sink_(sink) {
 }
 
 void BaseSerializer::Send(const iovec* v, uint32_t len) {
@@ -42,7 +42,8 @@ void BaseSerializer::Send(const iovec* v, uint32_t len) {
 
   error_code ec;
   if (batch_.empty()) {
-    ec = sink_->Write(v, len);
+    // ec = sink_->Write(v, len);
+    sink_->AsyncWrite2(v, len);
   } else {
     DVLOG(1) << "Sending batch to stream " << sink_ << "\n" << batch_;
 
@@ -50,7 +51,8 @@ void BaseSerializer::Send(const iovec* v, uint32_t len) {
     tmp[0].iov_base = batch_.data();
     tmp[0].iov_len = batch_.size();
     copy(v, v + len, tmp + 1);
-    ec = sink_->Write(tmp, len + 1);
+    // ec = sink_->Write(tmp, len + 1);
+    sink_->AsyncWrite2(tmp, len + 1);
     batch_.clear();
   }
 
@@ -102,7 +104,7 @@ void MemcacheSerializer::SendError() {
   SendDirect("ERROR\r\n");
 }
 
-ReplyBuilder::ReplyBuilder(Protocol protocol, ::io::Sink* sink) : protocol_(protocol) {
+ReplyBuilder::ReplyBuilder(Protocol protocol, util::FiberSocketBase* sink) : protocol_(protocol) {
   if (protocol == Protocol::REDIS) {
     serializer_.reset(new RespSerializer(sink));
   } else {
