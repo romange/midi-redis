@@ -75,8 +75,8 @@ void Connection::HandleRequests() {
   util::ThisFiber::SetName("DflyConnection");
 
   LinuxSocketBase* lsb = static_cast<LinuxSocketBase*>(socket_.get());
-  // int val = 1;
-  // CHECK_EQ(0, setsockopt(socket_->native_handle(), SOL_TCP, TCP_NODELAY, &val, sizeof(val)));
+  int val = 1;
+  CHECK_EQ(0, setsockopt(socket_->native_handle(), SOL_TCP, TCP_NODELAY, &val, sizeof(val)));
 
   auto ep = lsb->RemoteEndpoint();
 
@@ -181,10 +181,51 @@ auto Connection::ParseRedis(base::IoBuf* io_buf) -> ParserStatus {
         DVLOG(2) << "Got Args with first token " << ToSV(first.GetBuf());
       }
 
-      // An optimization to skip dispatch_q_ if no pipelining is identified.
-      // We use ASYNC_DISPATCH as a lock to avoid out-of-order replies when the
-      // dispatch fiber pulls the last record but is still processing the command and then this
-      // fiber enters the condition below and executes out of order.
+      // TODO: Implement pipelining properly.
+      // 1. Allocate commands arguments so that they won't rely on io_buf (not a blocker) - see SET
+      //    just allocating its args inside for now.
+      // 2. Make commands fully asynchronous - done in SET for example.
+      // 3. Add ability to send into sockets from other threads.
+      //    I hacked this inside FiberSocketBase::AsyncWrite2 - midi-redis works
+      //    for non-pipelined commands.
+      // 4. Order the replies properly. The idea is to maintain an intrusive message queue but
+      //    only if cc_->conn_state.pending_requests > 0. Otherwise, we can dispatch directly.
+      //    The message queue comes into play if we submitted a command asynchronously
+      //    and then another command was read and parsed. If pending_requests is still > 0,
+      //    we need to enqueue the new command to the queue. For simplicity, for now
+      //    we can always enqueue. pending_requests is incremented in the coordinator, and
+      //    decremented after the reply is sent.
+      // c. Once the coordinator creates an intrusive reply item, it is appended to the queue,
+      //    and the associated command keeps pointer to the item.  When it needs to reply,
+      //    it moves the reply structure from the shard thread to the item
+      //    but not necessarily sends it. It's thread safe as nobody reads from that item yet.
+      //
+      // d. For simplicity, I assume only single shard, single hop commands for now (GET/SET).
+      //    There are two options: the item is at the head of the queue - or not.
+      //    If the item is at the head of the queue, the shard callback
+      //    can send the reply directly. Moreover, it can send multiple subsequent replies
+      //    from the queue, as long as they are finalized. So, say, message requests contain A, B;
+      //    and B callback was finished earlier than A, then its item will contain the reply,
+      //    but it won't be sent until A is also ready. When A is ready,
+      //    it can look at all the items at head that are ready, and combine them into a single
+      //    vectorized send. At any time only a single "owner" can send from the queue and it's
+      //    not necessarily the connection fiber.
+      // e. Multi-shard command could in theory also send partial replies (MGET) asynchronously,
+      //    but we could just have the last shard sending everything for simplicity.
+      // f. Multi-hop commands: they can be fully asynchronous, or just make the last hop
+      //    asynchronous for simplicity. Yes, the pipeline will stall on multi-hop commands,
+      //    but that's acceptable for the POC.
+      // g. FiberSocketBase::AsyncWrite2 assumes that everything we write is sent immediately and
+      //    check-fails on it. It should be fixed. Currently, epoll notification mechanism is
+      //    local to the proactor, so we can use DispatchBrief to schedule socket async writes
+      //    in the coordinator thread.
+      // h. Valkey uses a single epoll object in the process that is polled by different threads
+      //    and contains all fds. Not sure if it's a good idea to do the same here
+      //    but one thing I noticed - we call epoll_wait more frequently and each call brings
+      //    back only 1-2 events in helio, while in valkey each epoll_wait brings back
+      //    more events. I do not have any evidence it's even a problem as we call epoll_wait
+      //    during idle times, but it's something to think about.
+      //
       bool is_sync_dispatch = !cc_->conn_state.IsRunViaDispatch();
       if (dispatch_q_.empty() && is_sync_dispatch && consumed >= io_buf->InputLen()) {
         RespToArgList(args, &arg_vec);

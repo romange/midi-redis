@@ -30,6 +30,8 @@ BaseSerializer::BaseSerializer(util::FiberSocketBase* sink) : sink_(sink) {
 }
 
 void BaseSerializer::Send(const iovec* v, uint32_t len) {
+  // TODO: should_batch_ it's not safe as we access it from multiple threads.
+  // Moreover, we lack ordering logic when pipelines are involved.
   if (should_batch_) {
     // TODO: to introduce flushing when too much data is batched.
     for (unsigned i = 0; i < len; ++i) {

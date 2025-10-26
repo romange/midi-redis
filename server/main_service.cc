@@ -151,10 +151,9 @@ void Service::Set(CmdArgList args, ConnectionContext* cntx) {
 
   ShardId sid = Shard(key, shard_count());
 
-  // TODO: send stored only after the operation is complete from the sid thread back here.
-  fb2::ProactorBase* pb = fb2::ProactorBase::me();
+  // TODO: move pending_requests updates up the call-chain.
   cntx->conn_state.pending_requests.fetch_add(1, std::memory_order_relaxed);
-  auto cb = [pb, key = std::move(key), val = std::move(val), conn = cntx]() {
+  auto cb = [key = std::move(key), val = std::move(val), conn = cntx]() {
     EngineShard* es = EngineShard::tlocal();
     auto [it, res] = es->db_slice.AddOrFind(0, key);
     it->second = val;
