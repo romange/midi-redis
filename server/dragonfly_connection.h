@@ -14,6 +14,7 @@
 #include "server/resp_expr.h"
 #include "util/connection.h"
 #include "util/fibers/synchronization.h"
+#include "server/conn_context.h"
 
 typedef struct ssl_ctx_st SSL_CTX;
 
@@ -53,21 +54,14 @@ class Connection : public util::Connection {
   std::unique_ptr<MemcacheParser> memcache_parser_;
   Service* service_;
   SSL_CTX* ctx_;
-  std::shared_ptr<ConnectionContext> cc_;
+  std::unique_ptr<ConnectionContext> cc_;
 
-  struct Request {
-    absl::FixedArray<MutableStrSpan> args;
-    absl::FixedArray<char> storage;
+  static ConnectionContext::Request* FromArgs(RespVec args);
 
-    Request(size_t nargs, size_t capacity) : args(nargs), storage(capacity) {
-    }
-    Request(const Request&) = delete;
-  };
 
-  static Request* FromArgs(RespVec args);
 
-  std::deque<Request*> dispatch_q_;  // coordinated via evc_.
-  util::fb2::EventCount evc_;
+  // std::deque<Request*> dispatch_q_;  // coordinated via evc_.
+  // util::fb2::EventCount evc_;
   unsigned parser_error_ = 0;
   Protocol protocol_;
 };

@@ -108,7 +108,7 @@ void Connection::HandleRequests() {
 void Connection::InputLoop(FiberSocketBase* peer) {
   base::IoBuf io_buf{kMinReadSize};
 
-  auto dispatch_fb = fb2::Fiber(fb2::Launch::dispatch, [&] { DispatchFiber(peer); });
+  // auto dispatch_fb = fb2::Fiber(fb2::Launch::dispatch, [&] { DispatchFiber(peer); });
   ParserStatus status = OK;
   std::error_code ec;
 
@@ -140,7 +140,7 @@ void Connection::InputLoop(FiberSocketBase* peer) {
 
   cc_->conn_state.mask |= ConnectionState::CONN_CLOSING;  // Signal dispatch to close.
   evc_.notify();
-  dispatch_fb.Join();
+  // dispatch_fb.Join();
 
   if (cc_->ec()) {
     ec = cc_->ec();
@@ -179,6 +179,9 @@ auto Connection::ParseRedis(base::IoBuf* io_buf) -> ParserStatus {
       RespExpr& first = args.front();
       if (first.type == RespExpr::STRING) {
         DVLOG(2) << "Got Args with first token " << ToSV(first.GetBuf());
+      } else {
+        result = RedisParser::BAD_STRING;
+        break;
       }
 
       // TODO: Implement pipelining properly.
@@ -226,6 +229,10 @@ auto Connection::ParseRedis(base::IoBuf* io_buf) -> ParserStatus {
       //    more events. I do not have any evidence it's even a problem as we call epoll_wait
       //    during idle times, but it's something to think about.
       //
+      ConnectionContext::Request* req = FromArgs(std::move(args));
+      cc_->EnqueueRequest(req);
+      service_->DispatchCommand(CmdArgList{req->args.data(), req->args.size()}, cc_.get());
+#if 0
       bool is_sync_dispatch = !cc_->conn_state.IsRunViaDispatch();
       if (dispatch_q_.empty() && is_sync_dispatch && consumed >= io_buf->InputLen()) {
         RespToArgList(args, &arg_vec);
@@ -240,6 +247,7 @@ auto Connection::ParseRedis(base::IoBuf* io_buf) -> ParserStatus {
           ThisFiber::Yield();
         }
       }
+#endif
     }
     io_buf->ConsumeInput(consumed);
   } while (RedisParser::OK == result && !cc_->ec());
@@ -253,6 +261,7 @@ auto Connection::ParseRedis(base::IoBuf* io_buf) -> ParserStatus {
 
   return ERROR;
 }
+
 
 auto Connection::ParseMemcache(base::IoBuf* io_buf) -> ParserStatus {
   MemcacheParser::Result result = MemcacheParser::OK;
