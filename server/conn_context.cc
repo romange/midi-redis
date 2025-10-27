@@ -21,94 +21,87 @@ Protocol ConnectionContext::protocol() const {
 
 void ConnectionContext::ForeignSendStored() {
   reply_builder_.SendStored();
-  unsigned prev = conn_state.pending_requests.fetch_sub(1, std::memory_order_acq_rel);
+  unsigned prev = conn_state.pending_requests.fetch_sub(1, memory_order_acq_rel);
   DCHECK(prev > 0);
 }
 
-void ConnectionContext::EnqueueRequest(Request* req) {
+void ConnectionContext::SendError(Request* req, std::string_view str) {
+  // Enqueue an error response into the req.
+  req->resp = ErrorString{string{str}};
+  req->ready.store(true, memory_order_release);
+
+  request_queue_.TryDrain(&reply_builder_);
+};
+
+void ConnectionContext::RequestQueue::Enqueue(LockFreeRecord* req) {
   // updates tail only atomically, if queue is empty (therefore no consumers),
   // updates its head as well.
-  DCHECK(!req->send_ready);
+  DCHECK(!req->ready);
 
-  req->next.store(nullptr, std::memory_order_relaxed);
-  Request* prev_tail = dispatch_q_tail.exchange(req, std::memory_order_acq_rel);
+  pending_drain_calls_.fetch_add(1, memory_order_relaxed);
+  req->next.store(nullptr, memory_order_relaxed);
+  LockFreeRecord* prev_tail = dispatch_q_tail_.exchange(req, memory_order_acq_rel);
   if (prev_tail) {
     // We are acessing an object potentially consumed and deleted by another thread.
-    // See how in DeleteHeadChain we first ensure dispatch_q_tail is not updated before
+    // See how in TryDrainQueue we first ensure dispatch_q_tail is not updated before
     // deleting the object.
-    prev_tail->next.store(req, std::memory_order_release);
+    prev_tail->next.store(req, memory_order_release);
   } else {
-    DCHECK(!dispatch_q_head.load(std::memory_order_acquire));
+    DCHECK(!dispatch_q_head_.load(memory_order_acquire));
     // Queue was empty.
-    dispatch_q_head.store(req, std::memory_order_release);
+    dispatch_q_head_.store(req, memory_order_release);
   }
 }
 
-void ConnectionContext::SendError(Request* req, std::string_view str) {
-  auto* head = dispatch_q_head.load(std::memory_order_acquire);
-  if (head == req) {
-    // Send directly head and all the other queued requests.
-    reply_builder_.SendError(str);
-    DeleteHeadChain();
-  } else {
-    // Enqueue an error response into the req.
-    req->resp = ErrorString{string{str}};
-    req->send_ready.store(true, std::memory_order_release);
+void ConnectionContext::RequestQueue::TryDrain(ReplyBuilder* builder) {
+  pending_drain_calls_.fetch_sub(1, memory_order_relaxed);
+
+  try_drain_start:
+  // 2. Fetch the head of the queue (sync point with EnqueueRequest).
+  LockFreeRecord* head = dispatch_q_head_.exchange(nullptr, memory_order_acq_rel);
+  if (head == nullptr) {
+    return;
   }
-};
 
-// Prerequisite: the queue is not empty and the caller consumer is allowed to pop head.
-void ConnectionContext::DeleteHeadChain() {
-  // Avoid ABA problem by resetting the head during the head update. It could be that
-  // any Request deleted here, will be readded by coordinator thread,
-  // and then another thread will check against dispatch_q_head to mistakenly think they
-  // are first in the queue.
-  // After this point no other thread can pull from the queue.
-  auto* head = dispatch_q_head.exchange(nullptr, std::memory_order_acq_rel);
-  DCHECK(head);
+  // --- We have the baton. ---
+  while (head->ready.load(memory_order_acquire)) {
+    // --- Head is ready. Dequeue and send it. ---
+    LockFreeRecord* next = head->next.load(memory_order_relaxed);
 
-  Request* current = head;
-  do {
-    do {
-      // Send all the ready requests in the queue.
-      if (std::holds_alternative<ErrorString>(current->resp)) {
-        reply_builder_.SendError(std::get<ErrorString>(current->resp));
-      } else {
-        reply_builder_.SendStored();
+    // 4. Handle tail-race with producer.
+    if (next == nullptr) {
+      LockFreeRecord* expected = head;
+      if (!dispatch_q_tail_.compare_exchange_strong(expected, nullptr, memory_order_acq_rel)) {
+
+        // Spin-wait for producer to link.
+        while (!(next = head->next.load(memory_order_acquire))) ;
       }
-      Request* next = current->next.load(std::memory_order_relaxed);
+    }
 
-      if (next == nullptr) {
-        // current == dispatch_q_tail, we can not delete it before ensuring producer is not
-        // chaining it (see prev_tail->next.store in EnqueueRequest).
-        Request* expected = current;
+    // Process and delete the old head.
+    Request* req = static_cast<Request*>(head);
+    if (std::holds_alternative<ErrorString>(req->resp)) {
+      builder->SendError(std::get<ErrorString>(req->resp));
+    } else {
+      builder->SendStored();
+    }
+    delete head;
 
-        if (!dispatch_q_tail.compare_exchange_strong(expected, nullptr,
-                                                     std::memory_order_acq_rel)) {
-          // tail was updated, so "tail->next" is in process of being updated as well.
-          // There is a critical section between dispatch_q_tail and prev_tail->next update.
-          // which warrants this blocking point - we processed current so we must delete it,
-          // but if it's in process of being enqueued by the producer we can not delete,
-          // until its next is updated.
-          do {
-            next = current->next.load(std::memory_order_relaxed);
-          } while (next == nullptr);
-        }
-      }
-      delete current;
-      current = next;
-    } while (current && current->send_ready.load(std::memory_order_relaxed));
+    if (next == nullptr) {
+      // Queue is empty and we are done.
+      return;
+    }
+    head = next;
+  }  // while head is ready
 
-    if (!current)  // Reached the end of the queue, dispatch_q_head will stay nullptr.
-      break;
 
-    // current is not null, therefore dispatch_q_tail was never updated to nullptr,
-    // therefore we must fix dispatch_q_head to the current head.
+  dispatch_q_head_.store(head, memory_order_release); // head can not be accessed from this point.
 
-    // There are more requests in the queue but they are not ready to send last time we checked.
-    // Update head but then double-check send_ready.
-    dispatch_q_head.store(current, std::memory_order_release);
-  } while (current->send_ready.load(std::memory_order_acquire));
+  // if no more items, but we just restored head, it means some TryDrain calls skipped,
+  // due to dispatch_q_head_ being held. There is a risk of starvation here,
+  // therefore, lets try again.
+  if (pending_drain_calls_.load(memory_order_relaxed)  == 0)
+    goto try_drain_start;
 }
 
 }  // namespace dfly

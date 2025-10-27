@@ -58,8 +58,6 @@ class Connection : public util::Connection {
 
   static ConnectionContext::Request* FromArgs(RespVec args);
 
-
-
   // std::deque<Request*> dispatch_q_;  // coordinated via evc_.
   // util::fb2::EventCount evc_;
   unsigned parser_error_ = 0;

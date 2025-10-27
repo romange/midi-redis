@@ -18,14 +18,18 @@ class ConnectionContext {
   struct ErrorString : public std::string {};
   struct SimpleString : public std::string {};
 
-  using Response = std::variant<ErrorString, SimpleString>;
+  using Response = std::variant<std::monostate, ErrorString, SimpleString>;
 
-  struct Request {
+  struct LockFreeRecord {
+    std::atomic<LockFreeRecord*> next{nullptr};
+    std::atomic_bool ready{false};
+  };
+
+  struct Request : public LockFreeRecord {
     absl::FixedArray<MutableStrSpan> args;
     absl::FixedArray<char> storage;
-    std::atomic<Request*> next{nullptr};
+
     Response resp;
-    std::atomic_bool send_ready{false};
 
     Request(size_t nargs, size_t capacity) : args(nargs), storage(capacity) {
     }
@@ -46,22 +50,60 @@ class ConnectionContext {
 
   ConnectionState conn_state;
 
-  std::atomic<Request*> dispatch_q_head{nullptr}, dispatch_q_tail{nullptr};
-
   // Async, can be called from other threads.
   void ForeignSendStored();
 
-  void EnqueueRequest(Request* req);
+  void EnqueueRequest(Request* req) {
+    request_queue_.Enqueue(req);
+  }
 
   // Thread-safe and keeping pipeline semantics.
   void SendError(Request* req, std::string_view str);
 
- private:
+  // Stubs
+  void SendMCClientError(std::string_view str) {
+  }
+  void EndMultilineReply() {
+  }
 
-  void DeleteHeadChain();
+  void SendSimpleRespString(std::string_view str) {
+  }
+
+  void SendRespBlob(std::string_view str) {
+  }
+
+  void SendGetReply(std::string_view key, uint32_t flags, std::string_view value) {
+  }
+  void SendGetNotFound() {
+  }
+  void SendError(std::string_view str) {
+  }
+  void SendSimpleStrArr(const std::string_view* arr, uint32_t count) {
+  }
+  void SendOk() {
+  }
+
+  std::error_code ec() const {
+    return reply_builder_.ec();
+  }
+
+ private:
+  class RequestQueue {
+   public:
+    void Enqueue(LockFreeRecord* req);
+
+    void TryDrain(ReplyBuilder* builder);
+
+   private:
+    std::atomic<LockFreeRecord*> dispatch_q_head_{nullptr};
+    char buf[64];
+    std::atomic<LockFreeRecord*> dispatch_q_tail_{nullptr};
+    std::atomic_uint32_t pending_drain_calls_{0};
+  };
 
   ReplyBuilder reply_builder_;
   Connection* owner_;
+  RequestQueue request_queue_;
 };
 
 }  // namespace dfly

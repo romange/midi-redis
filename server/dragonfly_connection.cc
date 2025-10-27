@@ -139,7 +139,7 @@ void Connection::InputLoop(FiberSocketBase* peer) {
   } while (peer->IsOpen() && !cc_->ec());
 
   cc_->conn_state.mask |= ConnectionState::CONN_CLOSING;  // Signal dispatch to close.
-  evc_.notify();
+  // evc_.notify();
   // dispatch_fb.Join();
 
   if (cc_->ec()) {
@@ -288,14 +288,15 @@ auto Connection::ParseMemcache(base::IoBuf* io_buf) -> ParserStatus {
       }
     }
 
+    LOG(FATAL) << "TBD";
     // An optimization to skip dispatch_q_ if no pipelining is identified.
     // We use ASYNC_DISPATCH as a lock to avoid out-of-order replies when the
     // dispatch fiber pulls the last record but is still processing the command and then this
     // fiber enters the condition below and executes out of order.
-    bool is_sync_dispatch = (cc_->conn_state.mask & ConnectionState::ASYNC_DISPATCH) == 0;
+    /*bool is_sync_dispatch = (cc_->conn_state.mask & ConnectionState::ASYNC_DISPATCH) == 0;
     if (dispatch_q_.empty() && is_sync_dispatch && consumed >= io_buf->InputLen()) {
       service_->DispatchMC(cmd, value, cc_.get());
-    }
+    }*/
     io_buf->ConsumeInput(consumed);
   } while (!cc_->ec());
 
@@ -310,6 +311,7 @@ auto Connection::ParseMemcache(base::IoBuf* io_buf) -> ParserStatus {
   return ERROR;
 }
 
+#if 0
 // DispatchFiber handles commands coming from the InputLoop.
 // Thus, InputLoop can quickly read data from the input buffer, parse it and push
 // into the dispatch queue and DispatchFiber will run those commands asynchronously with InputLoop.
@@ -333,8 +335,9 @@ void Connection::DispatchFiber(util::FiberSocketBase* peer) {
 
   cc_->conn_state.mask |= ConnectionState::CONN_CLOSING;
 }
+#endif
 
-auto Connection::FromArgs(RespVec args) -> Request* {
+ConnectionContext::Request* Connection::FromArgs(RespVec args) {
   DCHECK(!args.empty());
   size_t backed_sz = 0;
   for (const auto& arg : args) {
@@ -343,7 +346,7 @@ auto Connection::FromArgs(RespVec args) -> Request* {
   }
   DCHECK(backed_sz);
 
-  Request* req = new Request{args.size(), backed_sz};
+  auto* req = new ConnectionContext::Request{args.size(), backed_sz};
 
   auto* next = req->storage.data();
   for (size_t i = 0; i < args.size(); ++i) {
