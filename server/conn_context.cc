@@ -19,18 +19,44 @@ Protocol ConnectionContext::protocol() const {
   return owner_->protocol();
 }
 
-void ConnectionContext::ForeignSendStored() {
-  reply_builder_.SendStored();
-  unsigned prev = conn_state.pending_requests.fetch_sub(1, memory_order_acq_rel);
-  DCHECK(prev > 0);
+void ConnectionContext::SendSimpleRespString(std::string_view str, Request* req) {
+  if (!req)
+    req = current_request;
+
+  CHECK(req);
+  if (req) {
+    // Enqueue a success response into the req.
+    req->resp = SimpleString{string{str}};
+    req->ready.store(true, memory_order_release);
+
+    request_queue_.TryDrain(&reply_builder_);
+  } else {
+    reply_builder_.SendSimpleRespString(str);
+  }
 }
 
-void ConnectionContext::SendError(Request* req, std::string_view str) {
-  // Enqueue an error response into the req.
-  req->resp = ErrorString{string{str}};
-  req->ready.store(true, memory_order_release);
+void ConnectionContext::SendStored(Request* req) {
+  // Not valid for memcache protocol.
+  SendOk(req);
+}
 
-  request_queue_.TryDrain(&reply_builder_);
+void ConnectionContext::SendOk(Request* req) {
+  SendSimpleRespString("OK", req);
+}
+
+void ConnectionContext::SendError(std::string_view str, Request* req) {
+  if (!req)
+    req = current_request;
+  CHECK(req);
+  if (req) {
+    // Enqueue an error response into the req.
+    req->resp = ErrorString{string{str}};
+    req->ready.store(true, memory_order_release);
+
+    request_queue_.TryDrain(&reply_builder_);
+  } else {
+    reply_builder_.SendError(str);
+  }
 };
 
 void ConnectionContext::RequestQueue::Enqueue(LockFreeRecord* req) {
@@ -82,8 +108,8 @@ void ConnectionContext::RequestQueue::TryDrain(ReplyBuilder* builder) {
     Request* req = static_cast<Request*>(head);
     if (std::holds_alternative<ErrorString>(req->resp)) {
       builder->SendError(std::get<ErrorString>(req->resp));
-    } else {
-      builder->SendStored();
+    } else if (std::holds_alternative<SimpleString>(req->resp)) {
+      builder->SendSimpleRespString(std::get<SimpleString>(req->resp));
     }
     delete head;
 

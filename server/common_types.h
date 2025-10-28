@@ -39,8 +39,6 @@ struct ConnectionState {
   bool IsRunViaDispatch() const {
     return mask & ASYNC_DISPATCH;
   }
-
-  std::atomic_uint32_t pending_requests{0};
 };
 
 template <typename View> inline ShardId Shard(const View& v, ShardId shard_num) {

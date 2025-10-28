@@ -98,7 +98,7 @@ void Connection::HandleRequests() {
 
   InputLoop(peer);
 
-  while (cc_->conn_state.pending_requests.load(std::memory_order_relaxed) > 0) {
+  while (cc_->HasPendingRequests()) {
     ThisFiber::Yield();
   }
 
@@ -191,17 +191,11 @@ auto Connection::ParseRedis(base::IoBuf* io_buf) -> ParserStatus {
       // 3. Add ability to send into sockets from other threads.
       //    I hacked this inside FiberSocketBase::AsyncWrite2 - midi-redis works
       //    for non-pipelined commands.
-      // 4. Order the replies properly. The idea is to maintain an intrusive message queue but
-      //    only if cc_->conn_state.pending_requests > 0. Otherwise, we can dispatch directly.
-      //    The message queue comes into play if we submitted a command asynchronously
-      //    and then another command was read and parsed. If pending_requests is still > 0,
-      //    we need to enqueue the new command to the queue. For simplicity, for now
-      //    we can always enqueue. pending_requests is incremented in the coordinator, and
-      //    decremented after the reply is sent.
+      // 4. Order the replies properly. Done.
       // c. Once the coordinator creates an intrusive reply item, it is appended to the queue,
       //    and the associated command keeps pointer to the item.  When it needs to reply,
       //    it moves the reply structure from the shard thread to the item
-      //    but not necessarily sends it. It's thread safe as nobody reads from that item yet.
+      //    but not necessarily sends it. Done.
       //
       // d. For simplicity, I assume only single shard, single hop commands for now (GET/SET).
       //    There are two options: the item is at the head of the queue - or not.
@@ -212,7 +206,7 @@ auto Connection::ParseRedis(base::IoBuf* io_buf) -> ParserStatus {
       //    but it won't be sent until A is also ready. When A is ready,
       //    it can look at all the items at head that are ready, and combine them into a single
       //    vectorized send. At any time only a single "owner" can send from the queue and it's
-      //    not necessarily the connection fiber.
+      //    not necessarily the connection fiber. Done.
       // e. Multi-shard command could in theory also send partial replies (MGET) asynchronously,
       //    but we could just have the last shard sending everything for simplicity.
       // f. Multi-hop commands: they can be fully asynchronous, or just make the last hop
@@ -231,6 +225,7 @@ auto Connection::ParseRedis(base::IoBuf* io_buf) -> ParserStatus {
       //
       ConnectionContext::Request* req = FromArgs(std::move(args));
       cc_->EnqueueRequest(req);
+      cc_->current_request = req;
       service_->DispatchCommand(CmdArgList{req->args.data(), req->args.size()}, cc_.get());
 #if 0
       bool is_sync_dispatch = !cc_->conn_state.IsRunViaDispatch();

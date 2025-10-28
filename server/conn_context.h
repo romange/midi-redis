@@ -50,15 +50,12 @@ class ConnectionContext {
 
   ConnectionState conn_state;
 
-  // Async, can be called from other threads.
-  void ForeignSendStored();
-
   void EnqueueRequest(Request* req) {
     request_queue_.Enqueue(req);
   }
 
   // Thread-safe and keeping pipeline semantics.
-  void SendError(Request* req, std::string_view str);
+  void SendError(std::string_view str, Request* req = nullptr);
 
   // Stubs
   void SendMCClientError(std::string_view str) {
@@ -66,8 +63,7 @@ class ConnectionContext {
   void EndMultilineReply() {
   }
 
-  void SendSimpleRespString(std::string_view str) {
-  }
+  void SendSimpleRespString(std::string_view str, Request* req = nullptr);
 
   void SendRespBlob(std::string_view str) {
   }
@@ -76,17 +72,23 @@ class ConnectionContext {
   }
   void SendGetNotFound() {
   }
-  void SendError(std::string_view str) {
-  }
+
   void SendSimpleStrArr(const std::string_view* arr, uint32_t count) {
   }
-  void SendOk() {
-  }
+
+  void SendOk(Request* req = nullptr);
+
+  void SendStored(Request* req = nullptr);
 
   std::error_code ec() const {
     return reply_builder_.ec();
   }
 
+  bool HasPendingRequests() const {
+    return !request_queue_.IsEmpty();
+  }
+
+  Request* current_request = nullptr;
  private:
   class RequestQueue {
    public:
@@ -94,6 +96,9 @@ class ConnectionContext {
 
     void TryDrain(ReplyBuilder* builder);
 
+    bool IsEmpty() const {
+      return dispatch_q_head_.load(std::memory_order_acquire) == nullptr;
+    }
    private:
     std::atomic<LockFreeRecord*> dispatch_q_head_{nullptr};
     char buf[64];

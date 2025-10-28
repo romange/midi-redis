@@ -151,15 +151,13 @@ void Service::Set(CmdArgList args, ConnectionContext* cntx) {
 
   ShardId sid = Shard(key, shard_count());
 
-  // TODO: move pending_requests updates up the call-chain.
-  cntx->conn_state.pending_requests.fetch_add(1, std::memory_order_relaxed);
-  auto cb = [key = std::move(key), val = std::move(val), conn = cntx]() {
+  // TODO: currently we need to capture explicitly cntx and req to be able to respond.
+  auto cb = [key = std::move(key), val = std::move(val), conn = cntx, req = cntx->current_request] {
     EngineShard* es = EngineShard::tlocal();
     auto [it, res] = es->db_slice.AddOrFind(0, key);
     it->second = val;
 
-    // Support foreign thread writes.
-    conn->ForeignSendStored();
+    conn->SendStored(req);
   };
   shard_set_.Add(sid, cb);
 }
