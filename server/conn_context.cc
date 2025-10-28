@@ -19,7 +19,7 @@ Protocol ConnectionContext::protocol() const {
   return owner_->protocol();
 }
 
-void ConnectionContext::SendSimpleRespString(std::string_view str, Request* req) {
+void ConnectionContext::SendSimpleRespString(string_view str, Request* req) {
   if (!req)
     req = current_request;
 
@@ -100,9 +100,14 @@ void ConnectionContext::RequestQueue::TryDrain(ReplyBuilder* builder) {
       if (!dispatch_q_tail_.compare_exchange_strong(expected, nullptr, memory_order_acq_rel)) {
 
         // Spin-wait for producer to link.
-        while (!(next = head->next.load(memory_order_acquire))) ;
+        while (!(next = head->next.load(memory_order_acquire))) {
+          sched_yield();
+        }
       }
     }
+
+    bool has_more = (next != nullptr);
+    builder->SetBatchMode(has_more);
 
     // Process and delete the old head.
     Request* req = static_cast<Request*>(head);
@@ -121,12 +126,17 @@ void ConnectionContext::RequestQueue::TryDrain(ReplyBuilder* builder) {
   }  // while head is ready
 
 
-  dispatch_q_head_.store(head, memory_order_release); // head can not be accessed from this point.
+  // head can not be accessed from this point.
+  // we use memory_order_seq_cst to make sure that the load below is not reordered before
+  // this store.
+  dispatch_q_head_.store(head, memory_order_seq_cst);
 
   // if no more items, but we just restored head, it means some TryDrain calls skipped,
   // due to dispatch_q_head_ being held. There is a risk of starvation here,
   // therefore, lets try again.
-  if (pending_drain_calls_.load(memory_order_relaxed)  == 0)
+  unsigned pending = pending_drain_calls_.load(memory_order_relaxed);
+  VLOG(1) << "Pending drain calls: " << pending;
+  if (pending == 0)
     goto try_drain_start;
 }
 
