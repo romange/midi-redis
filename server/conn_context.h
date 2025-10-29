@@ -6,6 +6,8 @@
 
 #include "server/common_types.h"
 #include "server/reply_builder.h"
+#include <absl/functional/function_ref.h>
+
 
 namespace dfly {
 
@@ -92,9 +94,12 @@ class ConnectionContext {
  private:
   class RequestQueue {
    public:
+    // bool - whether more items are pending.
+    using ProcessCb = absl::FunctionRef<void(LockFreeRecord*, bool)>;
+
     void Enqueue(LockFreeRecord* req);
 
-    void TryDrain(ReplyBuilder* builder);
+    void TryDrain(ProcessCb cb);
 
     bool IsEmpty() const {
       return dispatch_q_head_.load(std::memory_order_acquire) == nullptr;
@@ -105,6 +110,8 @@ class ConnectionContext {
     std::atomic<LockFreeRecord*> dispatch_q_tail_{nullptr};
     std::atomic_uint32_t pending_drain_calls_{0};
   };
+
+  void TryDrain();
 
   ReplyBuilder reply_builder_;
   Connection* owner_;

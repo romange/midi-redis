@@ -4,6 +4,7 @@
 #include <string_view>
 
 #include "io/io.h"
+#include "base/spinlock.h"
 #include "server/dfly_protocol.h"
 #include "server/op_status.h"
 #include "util/fiber_socket_base.h"
@@ -11,6 +12,7 @@
 namespace dfly {
 
 class BaseSerializer {
+  // base::SpinLock lock_;
  public:
   explicit BaseSerializer(util::FiberSocketBase* sink);
 

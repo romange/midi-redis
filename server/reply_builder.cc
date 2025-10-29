@@ -30,10 +30,6 @@ BaseSerializer::BaseSerializer(util::FiberSocketBase* sink) : sink_(sink) {
 }
 
 void BaseSerializer::Send(const iovec* v, uint32_t len) {
-  // TODO: should_batch_ it's not safe as we access it from multiple threads.
-  // Moreover, we lack ordering logic when pipelines are involved.
-  atomic_thread_fence(memory_order_acquire);
-
   if (should_batch_) {
     // TODO: to introduce flushing when too much data is batched.
     for (unsigned i = 0; i < len; ++i) {
@@ -41,7 +37,6 @@ void BaseSerializer::Send(const iovec* v, uint32_t len) {
       DVLOG(2) << "Appending to stream " << sink_ << " " << src;
       batch_.append(src.data(), src.size());
     }
-    atomic_thread_fence(memory_order_release);
     return;
   }
 
@@ -64,7 +59,6 @@ void BaseSerializer::Send(const iovec* v, uint32_t len) {
   if (ec) {
     ec_ = ec;
   }
-  atomic_thread_fence(memory_order_release);
 }
 
 void BaseSerializer::SendDirect(std::string_view raw) {

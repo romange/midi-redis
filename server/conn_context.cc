@@ -29,7 +29,7 @@ void ConnectionContext::SendSimpleRespString(string_view str, Request* req) {
     req->resp = SimpleString{string{str}};
     req->ready.store(true, memory_order_release);
 
-    request_queue_.TryDrain(&reply_builder_);
+    TryDrain();
   } else {
     reply_builder_.SendSimpleRespString(str);
   }
@@ -53,11 +53,24 @@ void ConnectionContext::SendError(std::string_view str, Request* req) {
     req->resp = ErrorString{string{str}};
     req->ready.store(true, memory_order_release);
 
-    request_queue_.TryDrain(&reply_builder_);
+    TryDrain();
   } else {
     reply_builder_.SendError(str);
   }
 };
+
+void ConnectionContext::TryDrain() {
+  request_queue_.TryDrain([this](LockFreeRecord* rec, bool has_more) {
+    Request* req = static_cast<Request*>(rec);
+    if (std::holds_alternative<ErrorString>(req->resp)) {
+      const auto& err = std::get<ErrorString>(req->resp);
+      reply_builder_.SendError(err);
+    } else if (std::holds_alternative<SimpleString>(req->resp)) {
+      const auto& ok = std::get<SimpleString>(req->resp);
+      reply_builder_.SendSimpleRespString(ok);
+    }
+  });
+}
 
 void ConnectionContext::RequestQueue::Enqueue(LockFreeRecord* req) {
   // updates tail only atomically, if queue is empty (therefore no consumers),
@@ -79,11 +92,13 @@ void ConnectionContext::RequestQueue::Enqueue(LockFreeRecord* req) {
   }
 }
 
-void ConnectionContext::RequestQueue::TryDrain(ReplyBuilder* builder) {
+void ConnectionContext::RequestQueue::TryDrain(ProcessCb cb) {
   pending_drain_calls_.fetch_sub(1, memory_order_relaxed);
 
-  try_drain_start:
-  // 2. Fetch the head of the queue (sync point with EnqueueRequest).
+try_drain_start:
+
+  // Fetch the head of the queue (sync point with Enqueue).
+  // Note, that even though we grab the head,
   LockFreeRecord* head = dispatch_q_head_.exchange(nullptr, memory_order_acq_rel);
   if (head == nullptr) {
     return;
@@ -91,14 +106,18 @@ void ConnectionContext::RequestQueue::TryDrain(ReplyBuilder* builder) {
 
   // --- We have the baton. ---
   while (head->ready.load(memory_order_acquire)) {
-    // --- Head is ready. Dequeue and send it. ---
+    // The order here is important. If we update dispatch_q_tail_ before processing head
+    // it is possible that a producer enqueues a new item and updates the tail and
+    // another consumer comes in and sees the new tail and processes it out of order.
+
     LockFreeRecord* next = head->next.load(memory_order_relaxed);
+
+    cb(head, next != nullptr);
 
     // 4. Handle tail-race with producer.
     if (next == nullptr) {
       LockFreeRecord* expected = head;
       if (!dispatch_q_tail_.compare_exchange_strong(expected, nullptr, memory_order_acq_rel)) {
-
         // Spin-wait for producer to link.
         while (!(next = head->next.load(memory_order_acquire))) {
           sched_yield();
@@ -106,16 +125,6 @@ void ConnectionContext::RequestQueue::TryDrain(ReplyBuilder* builder) {
       }
     }
 
-    bool has_more = (next != nullptr);
-    builder->SetBatchMode(has_more);
-
-    // Process and delete the old head.
-    Request* req = static_cast<Request*>(head);
-    if (std::holds_alternative<ErrorString>(req->resp)) {
-      builder->SendError(std::get<ErrorString>(req->resp));
-    } else if (std::holds_alternative<SimpleString>(req->resp)) {
-      builder->SendSimpleRespString(std::get<SimpleString>(req->resp));
-    }
     delete head;
 
     if (next == nullptr) {
@@ -125,17 +134,18 @@ void ConnectionContext::RequestQueue::TryDrain(ReplyBuilder* builder) {
     head = next;
   }  // while head is ready
 
-
   // head can not be accessed from this point.
-  // we use memory_order_seq_cst to make sure that the load below is not reordered before
-  // this store.
-  dispatch_q_head_.store(head, memory_order_seq_cst);
+  dispatch_q_head_.store(head, memory_order_release);
+
+  // we use a fence to make sure that the load below is not reordered before
+  // the store above.
+  atomic_thread_fence(memory_order_seq_cst);
 
   // if no more items, but we just restored head, it means some TryDrain calls skipped,
   // due to dispatch_q_head_ being held. There is a risk of starvation here,
   // therefore, lets try again.
   unsigned pending = pending_drain_calls_.load(memory_order_relaxed);
-  VLOG(1) << "Pending drain calls: " << pending;
+  DVLOG(1) << "Pending drain calls: " << pending;
   if (pending == 0)
     goto try_drain_start;
 }
