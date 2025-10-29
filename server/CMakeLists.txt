@@ -1,5 +1,5 @@
 add_executable(midi-redis dfly_main.cc)
-cxx_link(midi-redis base dragonfly_lib)
+cxx_link(midi-redis base dragonfly_lib TRDP::mimalloc2)
 
 add_library(dragonfly_lib command_registry.cc common_types.cc config_flags.cc 
             conn_context.cc db_slice.cc debugcmd.cc dragonfly_listener.cc
