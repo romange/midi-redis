@@ -2,12 +2,16 @@
 // See LICENSE for licensing terms.
 //
 
+#include <mimalloc-new-delete.h>
+
 #include "base/init.h"
 #include "server/main_service.h"
 #include "server/dragonfly_listener.h"
 #include "util/accept_server.h"
 #include "util/fibers/pool.h"
-#include "util/varz.h"
+
+
+
 
 ABSL_FLAG(int32_t, http_port, 8080, "Http port.");
 ABSL_DECLARE_FLAG(uint32_t, port);
