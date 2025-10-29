@@ -4,10 +4,10 @@
 
 #pragma once
 
-#include "server/common_types.h"
-#include "server/reply_builder.h"
 #include <absl/functional/function_ref.h>
 
+#include "server/common_types.h"
+#include "server/reply_builder.h"
 
 namespace dfly {
 
@@ -19,8 +19,9 @@ class ConnectionContext {
  public:
   struct ErrorString : public std::string {};
   struct SimpleString : public std::string {};
-
-  using Response = std::variant<std::monostate, ErrorString, SimpleString>;
+  struct BulkString : public std::string {};
+  using Null = std::nullptr_t;
+  using Response = std::variant<std::monostate, ErrorString, SimpleString, BulkString, Null>;
 
   struct LockFreeRecord {
     std::atomic<LockFreeRecord*> next{nullptr};
@@ -70,10 +71,8 @@ class ConnectionContext {
   void SendRespBlob(std::string_view str) {
   }
 
-  void SendGetReply(std::string_view key, uint32_t flags, std::string_view value) {
-  }
-  void SendGetNotFound() {
-  }
+  void SendGetReply(std::string_view key, uint32_t flags, std::string_view value, Request* req);
+  void SendGetNotFound(Request* re);
 
   void SendSimpleStrArr(const std::string_view* arr, uint32_t count) {
   }
@@ -91,6 +90,7 @@ class ConnectionContext {
   }
 
   Request* current_request = nullptr;
+
  private:
   class RequestQueue {
    public:
@@ -104,6 +104,7 @@ class ConnectionContext {
     bool IsEmpty() const {
       return dispatch_q_head_.load(std::memory_order_acquire) == nullptr;
     }
+
    private:
     std::atomic<LockFreeRecord*> dispatch_q_head_{nullptr};
     char buf[64];

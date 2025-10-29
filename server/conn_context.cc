@@ -24,15 +24,11 @@ void ConnectionContext::SendSimpleRespString(string_view str, Request* req) {
     req = current_request;
 
   CHECK(req);
-  if (req) {
-    // Enqueue a success response into the req.
-    req->resp = SimpleString{string{str}};
-    req->ready.store(true, memory_order_release);
 
-    TryDrain();
-  } else {
-    reply_builder_.SendSimpleRespString(str);
-  }
+  // Enqueue a success response into the req.
+  req->resp = SimpleString{string{str}};
+  req->ready.store(true, memory_order_release);
+  TryDrain();
 }
 
 void ConnectionContext::SendStored(Request* req) {
@@ -48,16 +44,33 @@ void ConnectionContext::SendError(std::string_view str, Request* req) {
   if (!req)
     req = current_request;
   CHECK(req);
-  if (req) {
-    // Enqueue an error response into the req.
-    req->resp = ErrorString{string{str}};
-    req->ready.store(true, memory_order_release);
+  // Enqueue an error response into the req.
+  req->resp = ErrorString{string{str}};
+  req->ready.store(true, memory_order_release);
 
-    TryDrain();
-  } else {
-    reply_builder_.SendError(str);
-  }
+  TryDrain();
 };
+
+void ConnectionContext::SendGetReply(std::string_view key, uint32_t flags, std::string_view value,
+                                     Request* req) {
+  DCHECK(req);
+
+  // Enqueue an error response into the req.
+  req->resp = BulkString{string{value}};
+  req->ready.store(true, memory_order_release);
+
+  TryDrain();
+}
+
+void ConnectionContext::SendGetNotFound(Request* req) {
+  DCHECK(req);
+
+  // Enqueue an error response into the req.
+  req->resp = Null{};
+  req->ready.store(true, memory_order_release);
+
+  TryDrain();
+}
 
 void ConnectionContext::TryDrain() {
   request_queue_.TryDrain([this](LockFreeRecord* rec, bool has_more) {
@@ -68,6 +81,13 @@ void ConnectionContext::TryDrain() {
     } else if (std::holds_alternative<SimpleString>(req->resp)) {
       const auto& ok = std::get<SimpleString>(req->resp);
       reply_builder_.SendSimpleRespString(ok);
+    } else if (std::holds_alternative<BulkString>(req->resp)) {
+      const auto& bulk = std::get<BulkString>(req->resp);
+      reply_builder_.SendBulk(bulk);
+    } else if (std::holds_alternative<Null>(req->resp)) {
+      reply_builder_.SendGetNotFound();
+    } else {
+      LOG(ERROR) << "Unknown response variant";
     }
   });
 }

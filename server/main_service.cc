@@ -166,7 +166,7 @@ void Service::Get(CmdArgList args, ConnectionContext* cntx) {
   string_view key = ArgS(args, 1);
   ShardId sid = Shard(key, shard_count());
 
-  OpResult<string> opres = shard_set_.Await(sid, [&]() -> OpResult<string> {
+  /*OpResult<string> opres = shard_set_.Await(sid, [&]() -> OpResult<string> {
     EngineShard* es = EngineShard::tlocal();
     OpResult<MainIterator> res = es->db_slice.Find(0, key);
     if (res) {
@@ -180,7 +180,18 @@ void Service::Get(CmdArgList args, ConnectionContext* cntx) {
   } else if (opres.status() == OpStatus::KEY_NOTFOUND) {
     cntx->SendGetNotFound();
   }
-  cntx->EndMultilineReply();
+  cntx->EndMultilineReply();*/
+
+  auto cb = [key = std::move(key), conn = cntx, req = cntx->current_request] {
+    EngineShard* es = EngineShard::tlocal();
+    OpResult<MainIterator> res = es->db_slice.Find(0, key);
+    if (res) {
+      conn->SendGetReply(key, 0, res.value()->second, req);
+    } else if (res.status() == OpStatus::KEY_NOTFOUND) {
+      conn->SendGetNotFound(req);
+    }
+  };
+  shard_set_.Add(sid, cb);
 }
 
 void Service::Debug(CmdArgList args, ConnectionContext* cntx) {
