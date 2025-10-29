@@ -75,8 +75,8 @@ void Connection::HandleRequests() {
   util::ThisFiber::SetName("DflyConnection");
 
   LinuxSocketBase* lsb = static_cast<LinuxSocketBase*>(socket_.get());
-  // int val = 1;
-  // CHECK_EQ(0, setsockopt(socket_->native_handle(), SOL_TCP, TCP_NODELAY, &val, sizeof(val)));
+  int val = 1;
+  CHECK_EQ(0, setsockopt(socket_->native_handle(), SOL_TCP, TCP_NODELAY, &val, sizeof(val)));
 
   auto ep = lsb->RemoteEndpoint();
 
