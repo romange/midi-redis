@@ -4,7 +4,12 @@
 
 #include "server/dragonfly_connection.h"
 
+extern "C" {
+#include "examples/redis_dict/sds.h"
+}
+
 #include <absl/container/flat_hash_map.h>
+#include <absl/strings/numbers.h>
 
 #include <boost/fiber/operations.hpp>
 
@@ -120,18 +125,27 @@ void Connection::InputLoop(FiberSocketBase* peer) {
 
     io_buf.CommitWrite(*recv_sz);
 
-    if (redis_parser_)
+    if (redis_parser_) {
       status = ParseRedis(&io_buf);
-    else {
+    } else {
       DCHECK(memcache_parser_);
       status = ParseMemcache(&io_buf);
     }
 
-    if (status == NEED_MORE) {
-      status = OK;
-    } else if (status != OK) {
+    if (status == ERROR) {
       break;
     }
+
+    unsigned to_execute = parsed_commands_.size() - (multibulk_len_ > 0 ? 1 : 0);
+    for (unsigned i = 0;  i < to_execute; ++i) {
+
+      // LOG(INFO) << "Dispatching command with argc=" << cmd.argc;
+      auto& cmd = parsed_commands_[i];
+      cc_->SendGetNotFound();
+      sdsfreesplitres(cmd.tokens, cmd.argc);
+    }
+    parsed_commands_.erase(parsed_commands_.begin(),
+                                   parsed_commands_.begin() + to_execute);
   } while (peer->IsOpen() && !cc_->ec());
 
   cc_->conn_state.mask |= ConnectionState::CONN_CLOSING;  // Signal dispatch to close.
@@ -161,7 +175,79 @@ void Connection::InputLoop(FiberSocketBase* peer) {
   }
 }
 
+enum ParseState {
+  INIT,
+  PARSE_INLINE,
+  PARSE_MULTIBULK,
+} state = INIT;
+
+#define PROTO_INLINE_MAX_SIZE (1024 * 64) /* Max size of inline reads */
+
 auto Connection::ParseRedis(base::IoBuf* io_buf) -> ParserStatus {
+  // TODO: the invariant should not be that we fully deplete io_buf
+  // the real use-case is more complicated, as we may want to pause when too many commands
+  // being in flight. For now we just loop.
+  while (io_buf->InputLen() > 0) {
+    auto input = io::View(io_buf->InputBuffer());
+    if (state == INIT) {
+      if (input[0] == '*') {
+        state = PARSE_MULTIBULK;
+      } else {
+        state = PARSE_INLINE;
+      }
+    }
+
+    if (state == PARSE_INLINE) {
+      int linefeed_chars = 1;
+
+      // int is_primary = c->read_flags & READ_FLAGS_PRIMARY;
+
+      /* Search for end of line */
+      size_t pos = input.find('\n', 0);
+
+      /* Nothing to do without a \r\n */
+      if (pos == string_view::npos) {
+        if (input.size() > PROTO_INLINE_MAX_SIZE) {
+          return ERROR;
+        }
+        return NEED_MORE;
+      }
+
+      /* Handle the \r\n case. */
+      if (pos && input[pos - 1] == '\r')
+        pos--, linefeed_chars++;
+
+      /* Split the input buffer up to the \r\n */
+      size_t querylen = pos;
+      // do we need aux here?
+      sds aux = sdsnewlen(input.data(), querylen);
+      int argc = 0;
+      sds* argv = sdssplitargs(aux, &argc);
+      sdsfree(aux);
+      if (argv == NULL) {
+        return ERROR;
+      }
+      CHECK(argc > 0);  // tbd.
+      io_buf->ConsumeInput(querylen + linefeed_chars);
+
+      /* Setup argv array on client structure */
+      if (argc) {
+        ParsedCommand command;
+        command.argc = argc;
+        command.tokens = argv;
+        parsed_commands_.push_back(command);
+      }
+    } else {
+      auto result = ParseMultiBulk(io_buf);
+      if (result != OK) {
+        return result;
+      }
+    }
+    state = INIT;
+  }
+  return OK;
+
+#if 0
   RespVec args;
   CmdArgVec arg_vec;
   uint32_t consumed = 0;
@@ -207,6 +293,7 @@ auto Connection::ParseRedis(base::IoBuf* io_buf) -> ParserStatus {
     return NEED_MORE;
 
   return ERROR;
+#endif
 }
 
 auto Connection::ParseMemcache(base::IoBuf* io_buf) -> ParserStatus {
@@ -254,6 +341,86 @@ auto Connection::ParseMemcache(base::IoBuf* io_buf) -> ParserStatus {
     return NEED_MORE;
 
   return ERROR;
+}
+
+auto Connection::ParseMultiBulk(base::IoBuf* io_buf) -> ParserStatus {
+  string_view input = ToSV(io_buf->InputBuffer());
+  DCHECK(!input.empty() && input[0] == '*');
+  if (multibulk_len_ == 0) {
+    /* Multi bulk length cannot be read without a \r\n */
+    size_t pos = input.find('\r', 0);
+    if (pos == string_view::npos) {
+      return input.size() > PROTO_INLINE_MAX_SIZE ? ERROR : NEED_MORE;
+    }
+
+    /* Buffer should also contain \n */
+    if (pos + 1 == input.size())
+      return NEED_MORE;
+
+    size_t multibulk_len_slen = pos - 1;  // due to '*'
+    long long ll = 0;
+
+    if (!absl::SimpleAtoi(input.substr(1, multibulk_len_slen), &ll))
+      return ERROR;
+
+    if (ll > INT_MAX || ll <= 0) {
+      return ERROR;
+    }
+    input.remove_prefix(pos + 2);
+    io_buf->ConsumeInput(pos + 2);
+
+    multibulk_len_ = ll;
+    ParsedCommand command;
+    command.argc = multibulk_len_;
+
+    // TODO: we leak memory in case of errors, fine for now.
+    command.tokens = (sds*)malloc(sizeof(sds) * multibulk_len_);
+    memset(command.tokens, 0, sizeof(sds) * multibulk_len_);
+    parsed_commands_.emplace_back(command);
+  }
+
+  DCHECK_GT(multibulk_len_, 0u);
+  DCHECK(parsed_commands_.size() > 0);
+
+  ParsedCommand& cur_cmd = parsed_commands_.back();
+  while (multibulk_len_) {
+    /* Read bulk length if unknown */
+    if (bulk_len_ == -1) {
+      size_t pos = input.find('\r', 0);
+      if (pos == string_view::npos) {
+        return input.size() > PROTO_INLINE_MAX_SIZE ? ERROR : NEED_MORE;
+      }
+      if (pos + 1 == input.size()) {
+        return NEED_MORE;
+      }
+      if (input[0] != '$' || input[pos + 1] != '\n') {
+        return ERROR;
+      }
+
+      size_t bulklen_slen = pos - 1;  // due to '$'
+      long long ll = 0;
+      if (!absl::SimpleAtoi(input.substr(1, bulklen_slen), &ll) || ll < 0) {
+        return ERROR;
+      }
+
+      input.remove_prefix(pos + 2);
+      io_buf->ConsumeInput(pos + 2);
+
+      bulk_len_ = ll;
+    }
+
+    /* Read bulk argument */
+    if (input.size() < size_t(bulk_len_) + 2) {
+      return NEED_MORE;
+    }
+    unsigned cur_argc = cur_cmd.argc - multibulk_len_;
+    cur_cmd.tokens[cur_argc] = sdsnewlen(input.data(), bulk_len_);
+    input.remove_prefix(bulk_len_ + 2);
+    io_buf->ConsumeInput(bulk_len_ + 2);
+    bulk_len_ = -1;
+    multibulk_len_--;
+  }
+  return OK;
 }
 
 // DispatchFiber handles commands coming from the InputLoop.

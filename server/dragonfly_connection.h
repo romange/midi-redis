@@ -15,6 +15,7 @@
 #include "util/connection.h"
 #include "util/fibers/synchronization.h"
 
+typedef char* sds;
 typedef struct ssl_ctx_st SSL_CTX;
 
 namespace dfly {
@@ -46,8 +47,16 @@ class Connection : public util::Connection {
   void InputLoop(util::FiberSocketBase* peer);
   void DispatchFiber(util::FiberSocketBase* peer);
 
+  struct ParsedCommand {
+    sds* tokens;
+    unsigned argc;
+  };
+
   ParserStatus ParseRedis(base::IoBuf* buf);
   ParserStatus ParseMemcache(base::IoBuf* buf);
+  ParserStatus ParseMultiBulk(base::IoBuf* buf);
+
+  std::vector<ParsedCommand> parsed_commands_;
 
   std::unique_ptr<RedisParser> redis_parser_;
   std::unique_ptr<MemcacheParser> memcache_parser_;
@@ -70,6 +79,8 @@ class Connection : public util::Connection {
   util::fb2::EventCount evc_;
   unsigned parser_error_ = 0;
   Protocol protocol_;
+  unsigned multibulk_len_ = 0;
+  long bulk_len_ = -1;  // -1 means we need to read it.
 };
 
 }  // namespace dfly
