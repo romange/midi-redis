@@ -136,16 +136,18 @@ void Connection::InputLoop(FiberSocketBase* peer) {
       break;
     }
 
-    unsigned to_execute = parsed_commands_.size() - (multibulk_len_ > 0 ? 1 : 0);
-    for (unsigned i = 0;  i < to_execute; ++i) {
-
+    unsigned to_execute = cc_->parsed_commands.size() - (multibulk_len_ > 0 ? 1 : 0);
+    VLOG_IF(1, to_execute > 0) << "Dispatching " << to_execute << " commands";
+    for (unsigned i = 0; i < to_execute; ++i) {
       // LOG(INFO) << "Dispatching command with argc=" << cmd.argc;
-      auto& cmd = parsed_commands_[i];
-      cc_->SendGetNotFound();
+      auto& cmd = cc_->parsed_commands[i];
+      cc_->SetBatchMode(i + 1 < to_execute);
+      cc_->current_cmd_idx = i;
+      service_->DispatchCommand(CmdArgList{}, cc_.get());
       sdsfreesplitres(cmd.tokens, cmd.argc);
     }
-    parsed_commands_.erase(parsed_commands_.begin(),
-                                   parsed_commands_.begin() + to_execute);
+    cc_->parsed_commands.erase(cc_->parsed_commands.begin(),
+                               cc_->parsed_commands.begin() + to_execute);
   } while (peer->IsOpen() && !cc_->ec());
 
   cc_->conn_state.mask |= ConnectionState::CONN_CLOSING;  // Signal dispatch to close.
@@ -175,12 +177,6 @@ void Connection::InputLoop(FiberSocketBase* peer) {
   }
 }
 
-enum ParseState {
-  INIT,
-  PARSE_INLINE,
-  PARSE_MULTIBULK,
-} state = INIT;
-
 #define PROTO_INLINE_MAX_SIZE (1024 * 64) /* Max size of inline reads */
 
 auto Connection::ParseRedis(base::IoBuf* io_buf) -> ParserStatus {
@@ -189,15 +185,15 @@ auto Connection::ParseRedis(base::IoBuf* io_buf) -> ParserStatus {
   // being in flight. For now we just loop.
   while (io_buf->InputLen() > 0) {
     auto input = io::View(io_buf->InputBuffer());
-    if (state == INIT) {
+    if (state_ == INIT) {
       if (input[0] == '*') {
-        state = PARSE_MULTIBULK;
+        state_ = PARSE_MULTIBULK;
       } else {
-        state = PARSE_INLINE;
+        state_ = PARSE_INLINE;
       }
     }
 
-    if (state == PARSE_INLINE) {
+    if (state_ == PARSE_INLINE) {
       int linefeed_chars = 1;
 
       // int is_primary = c->read_flags & READ_FLAGS_PRIMARY;
@@ -235,7 +231,7 @@ auto Connection::ParseRedis(base::IoBuf* io_buf) -> ParserStatus {
         ParsedCommand command;
         command.argc = argc;
         command.tokens = argv;
-        parsed_commands_.push_back(command);
+        cc_->parsed_commands.push_back(command);
       }
     } else {
       auto result = ParseMultiBulk(io_buf);
@@ -243,7 +239,9 @@ auto Connection::ParseRedis(base::IoBuf* io_buf) -> ParserStatus {
         return result;
       }
     }
-    state = INIT;
+    CHECK(multibulk_len_ == 0);
+    CHECK(bulk_len_ == -1);
+    state_ = INIT;
   }
   return OK;
 
@@ -345,8 +343,16 @@ auto Connection::ParseMemcache(base::IoBuf* io_buf) -> ParserStatus {
 
 auto Connection::ParseMultiBulk(base::IoBuf* io_buf) -> ParserStatus {
   string_view input = ToSV(io_buf->InputBuffer());
-  DCHECK(!input.empty() && input[0] == '*');
+  DCHECK(!input.empty());
   if (multibulk_len_ == 0) {
+    if (cc_->parsed_commands.size() > 0) {
+      auto& last_cmd = cc_->parsed_commands.back();
+      for (size_t i = 0; i < last_cmd.argc; i++) {
+        DCHECK(last_cmd.tokens[i] != nullptr);
+      }
+    }
+    DCHECK(input[0] == '*');
+
     /* Multi bulk length cannot be read without a \r\n */
     size_t pos = input.find('\r', 0);
     if (pos == string_view::npos) {
@@ -366,8 +372,9 @@ auto Connection::ParseMultiBulk(base::IoBuf* io_buf) -> ParserStatus {
     if (ll > INT_MAX || ll <= 0) {
       return ERROR;
     }
-    input.remove_prefix(pos + 2);
+
     io_buf->ConsumeInput(pos + 2);
+    input = ToSV(io_buf->InputBuffer());
 
     multibulk_len_ = ll;
     ParsedCommand command;
@@ -376,13 +383,13 @@ auto Connection::ParseMultiBulk(base::IoBuf* io_buf) -> ParserStatus {
     // TODO: we leak memory in case of errors, fine for now.
     command.tokens = (sds*)malloc(sizeof(sds) * multibulk_len_);
     memset(command.tokens, 0, sizeof(sds) * multibulk_len_);
-    parsed_commands_.emplace_back(command);
+    cc_->parsed_commands.emplace_back(command);
   }
 
   DCHECK_GT(multibulk_len_, 0u);
-  DCHECK(parsed_commands_.size() > 0);
+  DCHECK(cc_->parsed_commands.size() > 0);
 
-  ParsedCommand& cur_cmd = parsed_commands_.back();
+  ParsedCommand& cur_cmd = cc_->parsed_commands.back();
   while (multibulk_len_) {
     /* Read bulk length if unknown */
     if (bulk_len_ == -1) {
@@ -403,8 +410,8 @@ auto Connection::ParseMultiBulk(base::IoBuf* io_buf) -> ParserStatus {
         return ERROR;
       }
 
-      input.remove_prefix(pos + 2);
       io_buf->ConsumeInput(pos + 2);
+      input = ToSV(io_buf->InputBuffer());
 
       bulk_len_ = ll;
     }
@@ -414,11 +421,16 @@ auto Connection::ParseMultiBulk(base::IoBuf* io_buf) -> ParserStatus {
       return NEED_MORE;
     }
     unsigned cur_argc = cur_cmd.argc - multibulk_len_;
+    DCHECK(cur_cmd.tokens[cur_argc] == nullptr);
+
     cur_cmd.tokens[cur_argc] = sdsnewlen(input.data(), bulk_len_);
-    input.remove_prefix(bulk_len_ + 2);
     io_buf->ConsumeInput(bulk_len_ + 2);
+    input = ToSV(io_buf->InputBuffer());
     bulk_len_ = -1;
     multibulk_len_--;
+  }
+  for (size_t i = 0; i < cur_cmd.argc; i++) {
+    DCHECK(cur_cmd.tokens[i] != nullptr);
   }
   return OK;
 }

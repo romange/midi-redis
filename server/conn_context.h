@@ -4,14 +4,19 @@
 
 #pragma once
 
-#include "server/reply_builder.h"
 #include "server/common_types.h"
+#include "server/reply_builder.h"
 
 namespace dfly {
 
 class Connection;
 class EngineShardSet;
 class CommandId;
+
+struct ParsedCommand {
+  sds* tokens;
+  unsigned argc;
+};
 
 class ConnectionContext : public ReplyBuilder {
  public:
@@ -28,6 +33,9 @@ class ConnectionContext : public ReplyBuilder {
   Protocol protocol() const;
 
   ConnectionState conn_state;
+
+  std::vector<ParsedCommand> parsed_commands;
+  int current_cmd_idx = -1;
 
  private:
   Connection* owner_;

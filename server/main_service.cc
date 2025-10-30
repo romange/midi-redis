@@ -8,8 +8,12 @@
 #include <absl/strings/str_cat.h>
 #include <xxhash.h>
 
-#include "base/logging.h"
 #include "base/flags.h"
+#include "base/logging.h"
+
+extern "C" {
+#include "examples/redis_dict/sds.h"
+}
 #include "server/conn_context.h"
 #include "server/debugcmd.h"
 #include "util/metrics/metrics.h"
@@ -54,32 +58,36 @@ void Service::Shutdown() {
   VLOG(1) << "Service::Shutdown";
 
   engine_varz.reset();
-  for (unsigned i = 0; i <shard_set_.size(); ++i) {
+  for (unsigned i = 0; i < shard_set_.size(); ++i) {
     shard_set_.pool()->at(i)->Await([&] { EngineShard::DestroyThreadLocal(); });
   }
 }
 
-void Service::DispatchCommand(CmdArgList args, ConnectionContext* cntx) {
-  CHECK(!args.empty());
+void Service::DispatchCommand(CmdArgList deprecated, ConnectionContext* cntx) {
+  CHECK(cntx->current_cmd_idx >= 0 &&
+        static_cast<size_t>(cntx->current_cmd_idx) < cntx->parsed_commands.size());
   DCHECK_NE(0u, shard_set_.size()) << "Init was not called";
 
-  ToUpper(&args[0]);
+  auto& parsed_cmd = cntx->parsed_commands[cntx->current_cmd_idx];
+  CHECK_GT(parsed_cmd.argc, 0u);
 
-  VLOG(2) << "Got: " << args;
+  //ToUpper(&args[0]);
+  sdstoupper(parsed_cmd.tokens[0]);
+  // VLOG(2) << "Got: " << args;
 
-  string_view cmd_str = ArgS(args, 0);
+  string_view cmd_str = string_view(parsed_cmd.tokens[0], sdslen(parsed_cmd.tokens[0]));
   const CommandId* cid = registry_.Find(cmd_str);
 
   if (cid == nullptr) {
     return cntx->SendError(absl::StrCat("unknown command `", cmd_str, "`"));
   }
-
-  if ((cid->arity() > 0 && args.size() != size_t(cid->arity())) ||
-      (cid->arity() < 0 && args.size() < size_t(-cid->arity()))) {
+  unsigned argc = parsed_cmd.argc;
+  if ((cid->arity() > 0 && argc != size_t(cid->arity())) ||
+      (cid->arity() < 0 && argc < size_t(-cid->arity()))) {
     return cntx->SendError(WrongNumArgsError(cmd_str));
   }
   cntx->cid = cid;
-  cid->Invoke(args, cntx);
+  cid->Invoke(deprecated, cntx);
 }
 
 void Service::DispatchMC(const MemcacheParser::Command& cmd, std::string_view value,
@@ -130,22 +138,25 @@ void Service::RegisterHttp(HttpListenerBase* listener) {
 }
 
 void Service::Ping(CmdArgList args, ConnectionContext* cntx) {
-  if (args.size() > 2) {
+  const ParsedCommand& pcmd = cntx->parsed_commands[cntx->current_cmd_idx];
+
+  if (pcmd.argc > 2) {
     return cntx->SendError("wrong number of arguments for 'ping' command");
   }
 
-  if (args.size() == 1) {
+  if (pcmd.argc == 1) {
     return cntx->SendSimpleRespString("PONG");
   }
-  std::string_view arg = ArgS(args, 1);
+  std::string_view arg = string_view(pcmd.tokens[1], sdslen(pcmd.tokens[1]));
   DVLOG(2) << "Ping " << arg;
 
   return cntx->SendSimpleRespString(arg);
 }
 
 void Service::Set(CmdArgList args, ConnectionContext* cntx) {
-  string_view key = ArgS(args, 1);
-  string_view val = ArgS(args, 2);
+  const ParsedCommand& pcmd = cntx->parsed_commands[cntx->current_cmd_idx];
+  string_view key = string_view(pcmd.tokens[1], sdslen(pcmd.tokens[1]));
+  string_view val = string_view(pcmd.tokens[2], sdslen(pcmd.tokens[2]));
   VLOG(2) << "Set " << key << " " << val;
 
   ShardId sid = Shard(key, shard_count());
@@ -159,7 +170,8 @@ void Service::Set(CmdArgList args, ConnectionContext* cntx) {
 }
 
 void Service::Get(CmdArgList args, ConnectionContext* cntx) {
-  string_view key = ArgS(args, 1);
+  const ParsedCommand& pcmd = cntx->parsed_commands[cntx->current_cmd_idx];
+  string_view key = string_view(pcmd.tokens[1], sdslen(pcmd.tokens[1]));
   ShardId sid = Shard(key, shard_count());
 
   OpResult<string> opres = shard_set_.Await(sid, [&]() -> OpResult<string> {

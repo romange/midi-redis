@@ -12,6 +12,8 @@
 #include <string_view>
 #include <vector>
 
+typedef char* sds;
+
 namespace dfly {
 
 using DbIndex = uint16_t;
