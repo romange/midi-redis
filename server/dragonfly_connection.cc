@@ -44,13 +44,14 @@ void SendProtocolError(RedisParser::Result pres, FiberSocketBase* peer) {
   }
 }
 
+#if 0
 void RespToArgList(const RespVec& src, CmdArgVec* dest) {
   dest->resize(src.size());
   for (size_t i = 0; i < src.size(); ++i) {
     (*dest)[i] = ToMSS(src[i].GetBuf());
   }
 }
-
+#endif
 constexpr size_t kMinReadSize = 256;
 
 }  // namespace
@@ -108,22 +109,60 @@ void Connection::HandleRequests() {
 
 void Connection::InputLoop(FiberSocketBase* peer) {
   base::IoBuf io_buf{kMinReadSize};
-
-  auto dispatch_fb = fb2::Fiber(fb2::Launch::dispatch, [&] { DispatchFiber(peer); });
-  ParserStatus status = OK;
+  int fd = peer->native_handle();
+  bool increase_buf = false;
   std::error_code ec;
+  bool cont_reading = true;
+
+  auto do_read = [&] {
+    auto buf = io_buf.AppendBuffer();
+    DCHECK_GT(buf.size(), 0u);
+    int res = recv(fd, buf.data(), buf.size(), 0);
+    DVLOG(1) << "Read " << res << " bytes from fd " << fd;
+    if (res > 0) {
+      io_buf.CommitWrite(res);
+      cont_reading = (io_buf.AppendLen() == 0);  // more to read if no space left
+      increase_buf = cont_reading;
+      // LOG_IF(INFO, read_socket) << "No space left in buffer, more data to read";
+    } else if (res == 0) {
+      ec = make_error_code(std::errc::connection_reset);
+    } else if (errno != EAGAIN && errno != EWOULDBLOCK) {
+      ec = std::error_code(errno, std::system_category());
+    }
+  };
+
+  peer->RegisterOnRecv([&](const FiberSocketBase::RecvNotification& rn) {
+    do_read();
+    evc_.notify();
+  });
+
+  // auto dispatch_fb = fb2::Fiber(fb2::Launch::dispatch, [&] { DispatchFiber(peer); });
+  ParserStatus status = OK;
 
   do {
-    auto buf = io_buf.AppendBuffer();
-    ::io::Result<size_t> recv_sz = peer->Recv(buf);
+    if (increase_buf) {
+      io_buf.EnsureCapacity(io_buf.Capacity() * 2);
+      increase_buf = false;
+    }
 
-    if (!recv_sz) {
-      ec = recv_sz.error();
+    // We could fill io_buf at random preempt points an get here with no space.
+    if (io_buf.AppendLen() == 0) {
+      cont_reading = false;
+    }
+
+    if (cont_reading) {
+      do_read();
+    }
+
+    VLOG(1) << "before await, append len=" << io_buf.AppendLen();
+    evc_.await([&] { return io_buf.InputLen() > 0 || ec; });
+
+    if (ec) {
       status = OK;
       break;
     }
 
-    io_buf.CommitWrite(*recv_sz);
+    // io_buf.CommitWrite(*recv_sz);
 
     if (redis_parser_) {
       status = ParseRedis(&io_buf);
@@ -135,6 +174,8 @@ void Connection::InputLoop(FiberSocketBase* peer) {
     if (status == ERROR) {
       break;
     }
+    VLOG(1) << "after parse, io_buf.InputLen=" << io_buf.InputLen() << " append len="
+            << io_buf.AppendLen();
 
     unsigned to_execute = cc_->parsed_commands.size() - (multibulk_len_ > 0 ? 1 : 0);
     VLOG_IF(1, to_execute > 0) << "Dispatching " << to_execute << " commands";
@@ -152,7 +193,7 @@ void Connection::InputLoop(FiberSocketBase* peer) {
 
   cc_->conn_state.mask |= ConnectionState::CONN_CLOSING;  // Signal dispatch to close.
   evc_.notify();
-  dispatch_fb.Join();
+  // dispatch_fb.Join();
 
   if (cc_->ec()) {
     ec = cc_->ec();
@@ -171,6 +212,7 @@ void Connection::InputLoop(FiberSocketBase* peer) {
       }
     }
   }
+  peer->ResetOnRecvHook();
 
   if (ec && !FiberSocketBase::IsConnClosed(ec)) {
     LOG(WARNING) << "Socket error " << ec;
@@ -439,6 +481,7 @@ auto Connection::ParseMultiBulk(base::IoBuf* io_buf) -> ParserStatus {
 // Thus, InputLoop can quickly read data from the input buffer, parse it and push
 // into the dispatch queue and DispatchFiber will run those commands asynchronously with InputLoop.
 // Note: in some cases, InputLoop may decide to dispatch directly and bypass the DispatchFiber.
+#if 0
 void Connection::DispatchFiber(util::FiberSocketBase* peer) {
   ThisFiber::SetName("DispatchFiber");
 
@@ -458,6 +501,7 @@ void Connection::DispatchFiber(util::FiberSocketBase* peer) {
 
   cc_->conn_state.mask |= ConnectionState::CONN_CLOSING;
 }
+#endif
 
 auto Connection::FromArgs(RespVec args) -> Request* {
   DCHECK(!args.empty());
