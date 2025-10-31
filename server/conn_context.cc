@@ -9,7 +9,7 @@
 namespace dfly {
 
 ConnectionContext::ConnectionContext(::io::Sink* stream, Connection* owner)
-    : ReplyBuilder(owner->protocol(), stream), owner_(owner) {
+    : owner_(owner), reply_builder_(owner->protocol(), stream) {
 }
 
 Protocol ConnectionContext::protocol() const {

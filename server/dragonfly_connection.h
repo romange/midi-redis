@@ -65,7 +65,7 @@ class Connection : public util::Connection {
     Request(const Request&) = delete;
   };
 
-  static Request* FromArgs(RespVec args);
+  // static Request* FromArgs(RespVec args);
 
   std::deque<Request*> dispatch_q_;  // coordinated via evc_.
   util::fb2::EventCount evc_;

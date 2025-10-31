@@ -501,7 +501,7 @@ void Connection::DispatchFiber(util::FiberSocketBase* peer) {
 
   cc_->conn_state.mask |= ConnectionState::CONN_CLOSING;
 }
-#endif
+
 
 auto Connection::FromArgs(RespVec args) -> Request* {
   DCHECK(!args.empty());
@@ -525,5 +525,6 @@ auto Connection::FromArgs(RespVec args) -> Request* {
 
   return req;
 }
+#endif
 
 }  // namespace dfly
