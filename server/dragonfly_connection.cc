@@ -122,7 +122,7 @@ void Connection::InputLoop(FiberSocketBase* peer) {
     if (res > 0) {
       io_buf.CommitWrite(res);
       cont_reading = (io_buf.AppendLen() == 0);  // more to read if no space left
-      increase_buf = cont_reading;
+      increase_buf = cont_reading && (io_buf.InputLen() > (io_buf.Capacity() / 2));
       // LOG_IF(INFO, read_socket) << "No space left in buffer, more data to read";
     } else if (res == 0) {
       ec = make_error_code(std::errc::connection_reset);
@@ -141,7 +141,8 @@ void Connection::InputLoop(FiberSocketBase* peer) {
 
   do {
     if (increase_buf) {
-      io_buf.EnsureCapacity(io_buf.Capacity() * 2);
+      if (io_buf.Capacity() < 65536)
+        io_buf.EnsureCapacity(io_buf.Capacity() * 2);
       increase_buf = false;
     }
 
@@ -166,6 +167,13 @@ void Connection::InputLoop(FiberSocketBase* peer) {
 
     if (redis_parser_) {
       status = ParseRedis(&io_buf);
+      // TODO: ParseRedis should fully deplete io_buf to simplify the I/O logic here,
+      // to suppose io_uring provided buffers, and to allow a thread-local buffer shared among
+      // multiple connections during the read/parse phase.
+      // Also the way `evc_.await` is currently used assumes that after parsing
+      // we have no data left in io_buf, and it enters
+      // a busy loop otherwise:` echo -n "set foo" | nc localhost 6379` to reproduce.
+      DCHECK(io_buf.InputLen() == 0 || status != OK);
     } else {
       DCHECK(memcache_parser_);
       status = ParseMemcache(&io_buf);
@@ -177,18 +185,17 @@ void Connection::InputLoop(FiberSocketBase* peer) {
     VLOG(1) << "after parse, io_buf.InputLen=" << io_buf.InputLen() << " append len="
             << io_buf.AppendLen();
 
-    unsigned to_execute = cc_->parsed_commands.size() - (multibulk_len_ > 0 ? 1 : 0);
-    VLOG_IF(1, to_execute > 0) << "Dispatching " << to_execute << " commands";
-    for (unsigned i = 0; i < to_execute; ++i) {
-      // LOG(INFO) << "Dispatching command with argc=" << cmd.argc;
-      auto& cmd = cc_->parsed_commands[i];
-      cc_->SetBatchMode(i + 1 < to_execute);
-      cc_->current_cmd_idx = i;
+    while (cc_->to_execute) {
+      auto* cmd = cc_->to_execute;
+      if (cmd->parse_complete == 0) {
+        break;
+      }
+      bool batch_mode = cmd->next != nullptr && cmd->next->parse_complete;
+      cc_->SetBatchMode(batch_mode);
       service_->DispatchCommand(CmdArgList{}, cc_.get());
-      sdsfreesplitres(cmd.tokens, cmd.argc);
+      cc_->to_execute = cmd->next;
     }
-    cc_->parsed_commands.erase(cc_->parsed_commands.begin(),
-                               cc_->parsed_commands.begin() + to_execute);
+    cc_->ReplyReadyCommands();
   } while (peer->IsOpen() && !cc_->ec());
 
   cc_->conn_state.mask |= ConnectionState::CONN_CLOSING;  // Signal dispatch to close.
@@ -270,10 +277,7 @@ auto Connection::ParseRedis(base::IoBuf* io_buf) -> ParserStatus {
 
       /* Setup argv array on client structure */
       if (argc) {
-        ParsedCommand command;
-        command.argc = argc;
-        command.tokens = argv;
-        cc_->parsed_commands.push_back(command);
+        cc_->AddParsedCommand(argv, argc, true);
       }
     } else {
       auto result = ParseMultiBulk(io_buf);
@@ -387,12 +391,6 @@ auto Connection::ParseMultiBulk(base::IoBuf* io_buf) -> ParserStatus {
   string_view input = ToSV(io_buf->InputBuffer());
   DCHECK(!input.empty());
   if (multibulk_len_ == 0) {
-    if (cc_->parsed_commands.size() > 0) {
-      auto& last_cmd = cc_->parsed_commands.back();
-      for (size_t i = 0; i < last_cmd.argc; i++) {
-        DCHECK(last_cmd.tokens[i] != nullptr);
-      }
-    }
     DCHECK(input[0] == '*');
 
     /* Multi bulk length cannot be read without a \r\n */
@@ -419,19 +417,17 @@ auto Connection::ParseMultiBulk(base::IoBuf* io_buf) -> ParserStatus {
     input = ToSV(io_buf->InputBuffer());
 
     multibulk_len_ = ll;
-    ParsedCommand command;
-    command.argc = multibulk_len_;
 
     // TODO: we leak memory in case of errors, fine for now.
-    command.tokens = (sds*)malloc(sizeof(sds) * multibulk_len_);
-    memset(command.tokens, 0, sizeof(sds) * multibulk_len_);
-    cc_->parsed_commands.emplace_back(command);
+    sds* tokens = (sds*)malloc(sizeof(sds) * multibulk_len_);
+    memset(tokens, 0, sizeof(sds) * multibulk_len_);
+    cc_->AddParsedCommand(tokens, multibulk_len_, false);
   }
 
   DCHECK_GT(multibulk_len_, 0u);
-  DCHECK(cc_->parsed_commands.size() > 0);
+  DCHECK(cc_->parsed_tail);
 
-  ParsedCommand& cur_cmd = cc_->parsed_commands.back();
+  ParsedCommand& cur_cmd = *cc_->parsed_tail;
   while (multibulk_len_) {
     /* Read bulk length if unknown */
     if (bulk_len_ == -1) {
@@ -470,10 +466,12 @@ auto Connection::ParseMultiBulk(base::IoBuf* io_buf) -> ParserStatus {
     input = ToSV(io_buf->InputBuffer());
     bulk_len_ = -1;
     multibulk_len_--;
-  }
+  }  // while (multibulk_len_)
+
   for (size_t i = 0; i < cur_cmd.argc; i++) {
     DCHECK(cur_cmd.tokens[i] != nullptr);
   }
+  cur_cmd.parse_complete = 1;
   return OK;
 }
 

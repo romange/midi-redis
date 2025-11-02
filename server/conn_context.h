@@ -14,11 +14,28 @@ class EngineShardSet;
 class CommandId;
 
 struct ParsedCommand {
+  ParsedCommand() : flags(0) {
+  }
+
   sds* tokens = nullptr;
   unsigned argc = 0;
   ParsedCommand* next = nullptr;
 
-  std::atomic_uint32_t state{0};
+  union {
+    struct {
+      uint8_t parse_complete : 1;
+      uint8_t execute_async : 1;
+
+      uint8_t reserved : 6;
+    };
+    uint8_t flags;
+  };
+
+  enum StateBits : uint32_t {
+    EXECUTE_DONE = 1 << 0,
+    HEAD_REPLY = 1 << 1,
+  };
+  std::atomic_uint8_t state{0};
 };
 
 class ConnectionContext {
@@ -37,10 +54,18 @@ class ConnectionContext {
 
   ConnectionState conn_state;
 
-  ParsedCommand* parsed_list = nullptr;
-  ParsedCommand* current
+  void AddParsedCommand(sds* tokens, unsigned argc, bool fully_parsed);
+
+  //
+  // The structure is:
+  // head -> ... -> to_send -> .. -> to_execute -> ... -> tail
+  //
+  ParsedCommand* parsed_head = nullptr;
+  ParsedCommand* parsed_tail = nullptr;
+  ParsedCommand* to_execute = nullptr;
+
   // std::vector<ParsedCommand> parsed_commands;
-  int current_cmd_idx = -1;
+  // int current_cmd_idx = -1;
 
   // Reply methods that delegate to reply_builder_
   void SendError(std::string_view str) {
@@ -94,6 +119,10 @@ class ConnectionContext {
   std::error_code ec() const {
     return reply_builder_.ec();
   }
+
+  void ReplyReadyCommands();
+
+  bool CheckIfCanReply(ParsedCommand* cmd);
 
  private:
   Connection* owner_;

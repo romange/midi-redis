@@ -64,11 +64,10 @@ void Service::Shutdown() {
 }
 
 void Service::DispatchCommand(CmdArgList deprecated, ConnectionContext* cntx) {
-  CHECK(cntx->current_cmd_idx >= 0 &&
-        static_cast<size_t>(cntx->current_cmd_idx) < cntx->parsed_commands.size());
+  CHECK(cntx->to_execute);
   DCHECK_NE(0u, shard_set_.size()) << "Init was not called";
 
-  auto& parsed_cmd = cntx->parsed_commands[cntx->current_cmd_idx];
+  auto& parsed_cmd = *cntx->to_execute;
   CHECK_GT(parsed_cmd.argc, 0u);
 
   //ToUpper(&args[0]);
@@ -138,7 +137,7 @@ void Service::RegisterHttp(HttpListenerBase* listener) {
 }
 
 void Service::Ping(CmdArgList args, ConnectionContext* cntx) {
-  const ParsedCommand& pcmd = cntx->parsed_commands[cntx->current_cmd_idx];
+  const ParsedCommand& pcmd = *cntx->to_execute;
 
   if (pcmd.argc > 2) {
     return cntx->SendError("wrong number of arguments for 'ping' command");
@@ -154,7 +153,7 @@ void Service::Ping(CmdArgList args, ConnectionContext* cntx) {
 }
 
 void Service::Set(CmdArgList args, ConnectionContext* cntx) {
-  const ParsedCommand& pcmd = cntx->parsed_commands[cntx->current_cmd_idx];
+  const ParsedCommand& pcmd = *cntx->to_execute;
   string_view key = string_view(pcmd.tokens[1], sdslen(pcmd.tokens[1]));
   string_view val = string_view(pcmd.tokens[2], sdslen(pcmd.tokens[2]));
   VLOG(2) << "Set " << key << " " << val;
@@ -170,7 +169,7 @@ void Service::Set(CmdArgList args, ConnectionContext* cntx) {
 }
 
 void Service::Get(CmdArgList args, ConnectionContext* cntx) {
-  const ParsedCommand& pcmd = cntx->parsed_commands[cntx->current_cmd_idx];
+  const ParsedCommand& pcmd = *cntx->to_execute;
   string_view key = string_view(pcmd.tokens[1], sdslen(pcmd.tokens[1]));
   ShardId sid = Shard(key, shard_count());
 
