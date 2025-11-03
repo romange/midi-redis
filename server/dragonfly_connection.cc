@@ -116,7 +116,11 @@ void Connection::InputLoop(FiberSocketBase* peer) {
 
   auto do_read = [&] {
     auto buf = io_buf.AppendBuffer();
-    DCHECK_GT(buf.size(), 0u);
+    if (buf.size() == 0) {
+      increase_buf = true;
+      cont_reading = true;
+      return;
+    }
     int res = recv(fd, buf.data(), buf.size(), 0);
     DVLOG(1) << "Read " << res << " bytes from fd " << fd;
     if (res > 0) {
@@ -138,7 +142,7 @@ void Connection::InputLoop(FiberSocketBase* peer) {
 
   // auto dispatch_fb = fb2::Fiber(fb2::Launch::dispatch, [&] { DispatchFiber(peer); });
   ParserStatus status = OK;
-
+  unsigned input_len = 0;
   do {
     if (increase_buf) {
       if (io_buf.Capacity() < 65536)
@@ -155,8 +159,12 @@ void Connection::InputLoop(FiberSocketBase* peer) {
       do_read();
     }
 
-    VLOG(1) << "before await, append len=" << io_buf.AppendLen();
-    evc_.await([&] { return io_buf.InputLen() > 0 || ec; });
+    VLOG(1) << "before await, append len=" << io_buf.AppendLen()
+            << " input len=" << io_buf.InputLen() << " " << cc_->parsed_head;
+    evc_.await([&] {
+      return io_buf.InputLen() > input_len || ec ||
+             (cc_->parsed_head && cc_->CheckIfCanReply(cc_->parsed_head));
+    });
 
     if (ec) {
       status = OK;
@@ -164,27 +172,32 @@ void Connection::InputLoop(FiberSocketBase* peer) {
     }
 
     // io_buf.CommitWrite(*recv_sz);
+    if (io_buf.InputLen() > 0) {
+      VLOG(1) << "after await, input len=" << io_buf.InputLen();
+      if (redis_parser_) {
+        status = ParseRedis(&io_buf);
+        // TODO: ParseRedis should fully deplete io_buf to simplify the I/O logic here,
+        // to suppose io_uring provided buffers, and to allow a thread-local buffer shared among
+        // multiple connections during the read/parse phase.
+        // Also the way `evc_.await` is currently used assumes that after parsing
+        // we have no data left in io_buf, and it enters
+        // a busy loop otherwise:` echo -n "set foo" | nc localhost 6379` to reproduce.
+        DCHECK(io_buf.InputLen() == 0 || status != OK);
+      } else {
+        DCHECK(memcache_parser_);
+        status = ParseMemcache(&io_buf);
+      }
 
-    if (redis_parser_) {
-      status = ParseRedis(&io_buf);
-      // TODO: ParseRedis should fully deplete io_buf to simplify the I/O logic here,
-      // to suppose io_uring provided buffers, and to allow a thread-local buffer shared among
-      // multiple connections during the read/parse phase.
-      // Also the way `evc_.await` is currently used assumes that after parsing
-      // we have no data left in io_buf, and it enters
-      // a busy loop otherwise:` echo -n "set foo" | nc localhost 6379` to reproduce.
-      DCHECK(io_buf.InputLen() == 0 || status != OK);
-    } else {
-      DCHECK(memcache_parser_);
-      status = ParseMemcache(&io_buf);
+      if (status == ERROR) {
+        break;
+      }
+      VLOG(1) << "after parse, io_buf.InputLen=" << io_buf.InputLen()
+              << " append len=" << io_buf.AppendLen();
     }
 
-    if (status == ERROR) {
-      break;
-    }
-    VLOG(1) << "after parse, io_buf.InputLen=" << io_buf.InputLen() << " append len="
-            << io_buf.AppendLen();
-
+    // important: we record the watermark now before we preempt and possibly
+    // increase io_buf further.
+    input_len = io_buf.InputLen();
     while (cc_->to_execute) {
       auto* cmd = cc_->to_execute;
       if (cmd->parse_complete == 0) {

@@ -86,6 +86,7 @@ void Service::DispatchCommand(CmdArgList deprecated, ConnectionContext* cntx) {
     return cntx->SendError(WrongNumArgsError(cmd_str));
   }
   cntx->cid = cid;
+  parsed_cmd.dispatched = 1;
   cid->Invoke(deprecated, cntx);
 }
 
@@ -173,6 +174,7 @@ void Service::Get(CmdArgList args, ConnectionContext* cntx) {
   string_view key = string_view(pcmd.tokens[1], sdslen(pcmd.tokens[1]));
   ShardId sid = Shard(key, shard_count());
 
+  #if 0
   OpResult<string> opres = shard_set_.Await(sid, [&]() -> OpResult<string> {
     EngineShard* es = EngineShard::tlocal();
     OpResult<MainIterator> res = es->db_slice.Find(0, key);
@@ -183,11 +185,26 @@ void Service::Get(CmdArgList args, ConnectionContext* cntx) {
   });
 
   if (opres) {
-    cntx->SendGetReply(key, 0, opres.value());
+    // cntx->SendGetReply(key, 0, opres.value());
   } else if (opres.status() == OpStatus::KEY_NOTFOUND) {
     cntx->SendGetNotFound();
   }
   cntx->EndMultilineReply();
+#else
+  CHECK(cntx->to_execute);
+  cntx->to_execute->execute_async = 1;
+  auto cb = [cntx, cmd = cntx->to_execute] {
+    EngineShard* es = EngineShard::tlocal();
+    string_view key = string_view(cmd->tokens[1], sdslen(cmd->tokens[1]));
+    OpResult<MainIterator> res = es->db_slice.Find(0, key);
+    if (res) {
+      cntx->SendGetReply(key, 0, res.value()->second, cmd);
+    } else if (res.status() == OpStatus::KEY_NOTFOUND) {
+      cntx->SendGetNotFound(cmd);
+    }
+  };
+  shard_set_.Add(sid, cb);
+#endif
 }
 
 void Service::Debug(CmdArgList args, ConnectionContext* cntx) {

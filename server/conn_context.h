@@ -17,6 +17,12 @@ struct ParsedCommand {
   ParsedCommand() : flags(0) {
   }
 
+  struct ErrorString : public std::string {};
+  struct SimpleString : public std::string {};
+  struct BulkString : public std::string {};
+  using Null = std::nullptr_t;
+  using Response = std::variant<std::monostate, ErrorString, SimpleString, BulkString, Null>;
+
   sds* tokens = nullptr;
   unsigned argc = 0;
   ParsedCommand* next = nullptr;
@@ -24,12 +30,15 @@ struct ParsedCommand {
   union {
     struct {
       uint8_t parse_complete : 1;
+      uint8_t dispatched : 1;
       uint8_t execute_async : 1;
 
       uint8_t reserved : 6;
     };
     uint8_t flags;
   };
+
+  Response resp;
 
   enum StateBits : uint32_t {
     EXECUTE_DONE = 1 << 0,
@@ -96,17 +105,20 @@ class ConnectionContext {
     reply_builder_.SendSimpleRespString(str);
   }
 
+  void SendSimpleRespString(std::string_view str, ParsedCommand* cmd);
+
   void SendRespBlob(std::string_view str) {
     reply_builder_.SendRespBlob(str);
   }
 
-  void SendGetReply(std::string_view key, uint32_t flags, std::string_view value) {
-    reply_builder_.SendGetReply(key, flags, value);
-  }
+  void SendGetReply(std::string_view key, uint32_t flags, std::string_view value,
+                    ParsedCommand* cmd);
 
   void SendGetNotFound() {
     reply_builder_.SendGetNotFound();
   }
+
+  void SendGetNotFound(ParsedCommand* cmd);
 
   void SendSimpleStrArr(const std::string_view* arr, uint32_t count) {
     reply_builder_.SendSimpleStrArr(arr, count);

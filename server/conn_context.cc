@@ -8,8 +8,10 @@ extern "C" {
 #include "examples/redis_dict/sds.h"
 }
 
+#include "base/logging.h"
 #include "server/dragonfly_connection.h"
 
+using namespace std;
 namespace dfly {
 
 ConnectionContext::ConnectionContext(::io::Sink* stream, Connection* owner)
@@ -34,6 +36,44 @@ void ConnectionContext::AddParsedCommand(sds* tokens, unsigned argc, bool fully_
   } else {
     parsed_tail->next = cmd;
     parsed_tail = cmd;
+
+    if (to_execute == nullptr) {
+      // we executed all the parsed commands so far.
+      to_execute = cmd;
+    }
+  }
+}
+
+void ConnectionContext::SendSimpleRespString(string_view str, ParsedCommand* cmd) {
+  DCHECK(cmd);
+
+  // Enqueue a success response into the req.
+  cmd->resp = ParsedCommand::SimpleString{string{str}};
+  uint8_t prev = cmd->state.fetch_or(ParsedCommand::EXECUTE_DONE, std::memory_order_acq_rel);
+  if (prev & ParsedCommand::HEAD_REPLY) {
+    owner_->Notify();
+  }
+}
+
+void ConnectionContext::SendGetReply(std::string_view key, uint32_t flags, std::string_view value,
+                                     ParsedCommand* cmd) {
+  DCHECK(cmd);
+
+  // Enqueue a bulk response into the req.
+  cmd->resp = ParsedCommand::BulkString{string{value}};
+  uint8_t prev = cmd->state.fetch_or(ParsedCommand::EXECUTE_DONE, std::memory_order_acq_rel);
+  if (prev & ParsedCommand::HEAD_REPLY) {
+    owner_->Notify();
+  }
+}
+
+void ConnectionContext::SendGetNotFound(ParsedCommand* cmd) {
+  DCHECK(cmd);
+  cmd->resp = ParsedCommand::Null{};
+  uint8_t prev = cmd->state.fetch_or(ParsedCommand::EXECUTE_DONE, std::memory_order_acq_rel);
+  if (prev & ParsedCommand::HEAD_REPLY) {
+    VLOG(1) << "Notify " << cmd;
+    owner_->Notify();
   }
 }
 
@@ -43,15 +83,35 @@ void ConnectionContext::ReplyReadyCommands() {
     if (!CheckIfCanReply(cmd)) {
       break;
     }
+    VLOG(1) << "Replying command " << cmd;
+    auto resp = std::move(cmd->resp);
 
     sdsfreesplitres(cmd->tokens, cmd->argc);
+
     auto* next = cmd->next;
     delete cmd;
     parsed_head = next;
+    bool batch_mode = (next != nullptr && next->dispatched);
+    SetBatchMode(batch_mode);
+
+    if (std::holds_alternative<ParsedCommand::ErrorString>(resp)) {
+      reply_builder_.SendError(std::get<ParsedCommand::ErrorString>(resp));
+    } else if (std::holds_alternative<ParsedCommand::SimpleString>(resp)) {
+      reply_builder_.SendSimpleRespString(std::get<ParsedCommand::SimpleString>(resp));
+    } else if (std::holds_alternative<ParsedCommand::BulkString>(resp)) {
+      reply_builder_.SendBulk(std::get<ParsedCommand::BulkString>(resp));
+    } else if (std::holds_alternative<ParsedCommand::Null>(resp)) {
+      reply_builder_.SendGetNotFound();
+    } else {
+      // Skip monostate.
+    }
+
   }
 }
 
 bool ConnectionContext::CheckIfCanReply(ParsedCommand* head) {
+  DCHECK(head);
+  DCHECK(head->parse_complete);
   if (!head->execute_async)
     return true;
 

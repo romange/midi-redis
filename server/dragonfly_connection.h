@@ -35,6 +35,9 @@ class Connection : public util::Connection {
     return protocol_;
   }
 
+  void Notify() {
+    evc_.notify();
+  }
  protected:
   void OnShutdown() override;
 
