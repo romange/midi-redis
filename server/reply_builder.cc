@@ -7,6 +7,7 @@
 #include <absl/strings/str_cat.h>
 
 #include "base/logging.h"
+#include "util/fiber_socket_base.h"
 
 using namespace std;
 using absl::StrAppend;
@@ -41,8 +42,11 @@ void BaseSerializer::Send(const iovec* v, uint32_t len) {
   }
 
   error_code ec;
+  auto* fb = static_cast<util::FiberSocketBase*>(sink_);
   if (batch_.empty()) {
-    ec = sink_->Write(v, len);
+
+    // ec = sink_->Write(v, len);
+    fb->AsyncWrite2(v, len);
   } else {
     DVLOG(1) << "Sending batch to stream " << sink_ << "\n" << batch_;
 
@@ -50,7 +54,7 @@ void BaseSerializer::Send(const iovec* v, uint32_t len) {
     tmp[0].iov_base = batch_.data();
     tmp[0].iov_len = batch_.size();
     copy(v, v + len, tmp + 1);
-    ec = sink_->Write(tmp, len + 1);
+    fb->AsyncWrite2(tmp, len + 1);
     batch_.clear();
   }
 
