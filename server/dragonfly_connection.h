@@ -14,6 +14,7 @@
 #include "server/resp_expr.h"
 #include "util/connection.h"
 #include "util/fibers/synchronization.h"
+#include "util/fiber_socket_base.h"
 
 typedef struct ssl_ctx_st SSL_CTX;
 
@@ -53,6 +54,9 @@ class Connection : public util::Connection {
   ParserStatus ParseMemcache(base::IoBuf* buf);
   ParserStatus ParseMultiBulk(base::IoBuf* buf);
 
+  // Returns true if socket might have more data to read.
+  bool DoRead(int fd, const util::FiberSocketBase::RecvNotification& rn, base::IoBuf* io_buf);
+
   std::unique_ptr<RedisParser> redis_parser_;
   std::unique_ptr<MemcacheParser> memcache_parser_;
   Service* service_;
@@ -76,7 +80,7 @@ class Connection : public util::Connection {
   Protocol protocol_;
   unsigned multibulk_len_ = 0;
   long bulk_len_ = -1;  // -1 means we need to read it.
-
+  std::error_code ec_;
   enum ParseState {
     INIT,
     PARSE_INLINE,

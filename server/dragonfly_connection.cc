@@ -13,6 +13,7 @@ extern "C" {
 
 #include <boost/fiber/operations.hpp>
 
+#include "base/flags.h"
 #include "base/io_buf.h"
 #include "base/logging.h"
 #include "server/command_registry.h"
@@ -22,6 +23,10 @@ extern "C" {
 #include "server/redis_parser.h"
 #include "util/fibers/fibers.h"
 #include "util/tls/tls_socket.h"
+
+#ifdef __linux__
+#include "util/fibers/uring_socket.h"
+#endif
 
 using namespace util;
 using namespace std;
@@ -107,66 +112,89 @@ void Connection::HandleRequests() {
   VLOG(1) << "Closed connection for peer " << ep;
 }
 
+bool Connection::DoRead(int fd, const util::FiberSocketBase::RecvNotification& rn,
+                        base::IoBuf* io_buf) {
+  DVLOG(1) << "DoRead called for fd " << fd;
+  if (std::holds_alternative<monostate>(rn.read_result)) {
+    auto buf = io_buf->AppendBuffer();
+    if (buf.empty()) {
+      return true;
+    }
+    int res = recv(fd, buf.data(), buf.size(), 0);
+    bool more = false;
+    DVLOG(1) << "Read " << res << " bytes from fd " << fd;
+    if (res > 0) {
+      io_buf->CommitWrite(res);
+      more = (size_t(res) == buf.size());
+    } else if (res == 0) {
+      ec_ = make_error_code(std::errc::connection_reset);
+    } else if (errno != EAGAIN && errno != EWOULDBLOCK) {
+      ec_ = std::error_code(errno, std::system_category());
+    }
+
+    // epoll notification.
+    evc_.notify();
+    return more;
+  }
+
+  if (std::holds_alternative<io::MutableBytes>(rn.read_result)) {
+    auto& buf = std::get<io::MutableBytes>(rn.read_result);
+    // TODO: parse directly from buf without copy.
+    // Can be done if we ensure that parsing fully consumes the input buffer.
+    io_buf->WriteAndCommit(buf.data(), buf.size());
+  } else {
+    int err = std::get<int>(rn.read_result);
+    if (err == 0) {
+      ec_ = make_error_code(std::errc::connection_reset);
+    } else if (errno != EAGAIN && errno != EWOULDBLOCK) {
+      ec_ = std::error_code(errno, std::system_category());
+    }
+  }
+
+  evc_.notify();
+  return false;
+}
+
 void Connection::InputLoop(FiberSocketBase* peer) {
   base::IoBuf io_buf{kMinReadSize};
   int fd = peer->native_handle();
   bool increase_buf = false;
-  std::error_code ec;
-  bool cont_reading = true;
+  bool sock_might_have_data = true;
 
-  auto do_read = [&] {
-    auto buf = io_buf.AppendBuffer();
-    if (buf.size() == 0) {
+#ifdef __linux__
+  if (socket_->proactor()->GetKind() == ProactorBase::IOURING) {
+    // breaks with tls.
+    auto* up = static_cast<fb2::UringProactor*>(socket_->proactor());
+    bool enable_multishot = up->BufRingEntrySize(kRecvSockGid) > 0;
+    if (enable_multishot) {
+      fb2::UringSocket* usock = static_cast<fb2::UringSocket*>(peer);
+      usock->set_bufring_id(kRecvSockGid);
+      usock->EnableRecvMultishot();
+    }
+  }
+#endif
+  peer->RegisterOnRecv([&, fd](const FiberSocketBase::RecvNotification& rn) {
+    sock_might_have_data = DoRead(fd, rn, &io_buf);
+    if (io_buf.AppendLen() == 0 && io_buf.Capacity() < 65536)
       increase_buf = true;
-      cont_reading = true;
-      return;
-    }
-    int res = recv(fd, buf.data(), buf.size(), 0);
-    DVLOG(1) << "Read " << res << " bytes from fd " << fd;
-    if (res > 0) {
-      io_buf.CommitWrite(res);
-      cont_reading = (io_buf.AppendLen() == 0);  // more to read if no space left
-      increase_buf = cont_reading && (io_buf.InputLen() > (io_buf.Capacity() / 2));
-      // LOG_IF(INFO, read_socket) << "No space left in buffer, more data to read";
-    } else if (res == 0) {
-      ec = make_error_code(std::errc::connection_reset);
-    } else if (errno != EAGAIN && errno != EWOULDBLOCK) {
-      ec = std::error_code(errno, std::system_category());
-    }
-  };
-
-  peer->RegisterOnRecv([&](const FiberSocketBase::RecvNotification& rn) {
-    do_read();
-    evc_.notify();
   });
 
   // auto dispatch_fb = fb2::Fiber(fb2::Launch::dispatch, [&] { DispatchFiber(peer); });
   ParserStatus status = OK;
-  unsigned input_len = 0;
+  unsigned min_parse_threshold = 0;
   do {
-    if (increase_buf) {
-      if (io_buf.Capacity() < 65536)
-        io_buf.EnsureCapacity(io_buf.Capacity() * 2);
-      increase_buf = false;
-    }
-
-    // We could fill io_buf at random preempt points an get here with no space.
-    if (io_buf.AppendLen() == 0) {
-      cont_reading = false;
-    }
-
-    if (cont_reading) {
-      do_read();
+    if (sock_might_have_data && io_buf.InputLen() <= min_parse_threshold) {
+      sock_might_have_data = DoRead(fd, FiberSocketBase::RecvNotification{}, &io_buf);
     }
 
     VLOG(1) << "before await, append len=" << io_buf.AppendLen()
             << " input len=" << io_buf.InputLen() << " " << cc_->parsed_head;
     evc_.await([&] {
-      return io_buf.InputLen() > input_len || ec ||
+      return io_buf.InputLen() > min_parse_threshold || ec_ ||
              (cc_->parsed_head && cc_->CheckIfCanReply(cc_->parsed_head));
     });
 
-    if (ec) {
+    if (ec_) {
       status = OK;
       break;
     }
@@ -197,7 +225,12 @@ void Connection::InputLoop(FiberSocketBase* peer) {
 
     // important: we record the watermark now before we preempt and possibly
     // increase io_buf further.
-    input_len = io_buf.InputLen();
+    min_parse_threshold = io_buf.InputLen();
+    if (increase_buf) {
+      io_buf.EnsureCapacity(io_buf.Capacity() * 2);
+      increase_buf = false;
+    }
+
     while (cc_->to_execute) {
       auto* cmd = cc_->to_execute;
       if (cmd->parse_complete == 0) {
@@ -216,7 +249,7 @@ void Connection::InputLoop(FiberSocketBase* peer) {
   // dispatch_fb.Join();
 
   if (cc_->ec()) {
-    ec = cc_->ec();
+    ec_ = cc_->ec();
   } else {
     if (status == ERROR) {
       VLOG(1) << "Error stats " << status;
@@ -227,15 +260,15 @@ void Connection::InputLoop(FiberSocketBase* peer) {
         std::error_code size_res = peer->Write(::io::Buffer(sv));
         if (!size_res) {
           LOG(WARNING) << "Error " << size_res;
-          ec = size_res;
+          ec_ = size_res;
         }
       }
     }
   }
   peer->ResetOnRecvHook();
 
-  if (ec && !FiberSocketBase::IsConnClosed(ec)) {
-    LOG(WARNING) << "Socket error " << ec;
+  if (ec_ && !FiberSocketBase::IsConnClosed(ec_)) {
+    LOG(WARNING) << "Socket error " << ec_;
   }
 }
 
