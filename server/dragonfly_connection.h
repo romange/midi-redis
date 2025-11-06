@@ -81,6 +81,7 @@ class Connection : public util::Connection {
   unsigned multibulk_len_ = 0;
   long bulk_len_ = -1;  // -1 means we need to read it.
   std::error_code ec_;
+  std::string parse_stash_;
   enum ParseState {
     INIT,
     PARSE_INLINE,

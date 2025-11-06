@@ -301,6 +301,8 @@ auto Connection::ParseRedis(base::IoBuf* io_buf) -> ParserStatus {
         if (input.size() > PROTO_INLINE_MAX_SIZE) {
           return ERROR;
         }
+        parse_stash_.append(input.data(), input.size());
+        io_buf->ConsumeInput(input.size());
         return NEED_MORE;
       }
 
@@ -310,17 +312,16 @@ auto Connection::ParseRedis(base::IoBuf* io_buf) -> ParserStatus {
 
       /* Split the input buffer up to the \r\n */
       size_t querylen = pos;
-      // do we need aux here?
-      sds aux = sdsnewlen(input.data(), querylen);
+      parse_stash_.append(input.data(), querylen);
+      parse_stash_.push_back('\0');  // null terminate for sdssplitargs
       int argc = 0;
-      sds* argv = sdssplitargs(aux, &argc);
-      sdsfree(aux);
+      sds* argv = sdssplitargs(parse_stash_.c_str(), &argc);
       if (argv == NULL) {
         return ERROR;
       }
       CHECK(argc > 0);  // tbd.
       io_buf->ConsumeInput(querylen + linefeed_chars);
-
+      parse_stash_.clear();
       /* Setup argv array on client structure */
       if (argc) {
         cc_->AddParsedCommand(argv, argc, true);
@@ -437,17 +438,13 @@ auto Connection::ParseMultiBulk(base::IoBuf* io_buf) -> ParserStatus {
   string_view input = ToSV(io_buf->InputBuffer());
   DCHECK(!input.empty());
   if (multibulk_len_ == 0) {
-    DCHECK(input[0] == '*');
+    DCHECK(input[0] == '*' || !parse_stash_.empty());
 
     /* Multi bulk length cannot be read without a \r\n */
     size_t pos = input.find('\r', 0);
-    if (pos == string_view::npos) {
+    if (pos == string_view::npos || pos + 1 == input.size()) {
       return input.size() > PROTO_INLINE_MAX_SIZE ? ERROR : NEED_MORE;
     }
-
-    /* Buffer should also contain \n */
-    if (pos + 1 == input.size())
-      return NEED_MORE;
 
     size_t multibulk_len_slen = pos - 1;  // due to '*'
     long long ll = 0;
@@ -465,7 +462,7 @@ auto Connection::ParseMultiBulk(base::IoBuf* io_buf) -> ParserStatus {
     multibulk_len_ = ll;
 
     // TODO: we leak memory in case of errors, fine for now.
-    sds* tokens = (sds*)malloc(sizeof(sds) * multibulk_len_);
+    sds* tokens = (sds*)sds_malloc(sizeof(sds) * multibulk_len_);
     memset(tokens, 0, sizeof(sds) * multibulk_len_);
     cc_->AddParsedCommand(tokens, multibulk_len_, false);
   }
