@@ -1,0 +1,44 @@
+diff --git a/base/CMakeLists.txt b/base/CMakeLists.txt
+index 162d149..37614a0 100644
+--- a/base/CMakeLists.txt
++++ b/base/CMakeLists.txt
+@@ -1,6 +1,9 @@
+ add_library(base cpu_features.cc hash.cc histogram.cc init.cc logging.cc proc_util.cc
+     pthread_utils.cc varz_node.cc cuckoo_map.cc io_buf.cc segment_pool.cc)
+ 
++# Add include path for backward-cpp header (located in main repo's third_party)
++target_include_directories(base PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/../..)
++
+ if (LEGACY_GLOG) 
+   set(LOG_LIBS glog::glog)
+ else()
+@@ -10,9 +13,27 @@ else()
+       absl::log_initialize)
+ endif()
+ 
++# backward-cpp requires libdw (for DWARF debug info) and libunwind for stack traces
++# with line numbers. We find and link these libraries on Linux.
++if (NOT APPLE)
++  find_library(LIBDW_LIBRARY dw)
++  find_library(LIBUNWIND_LIBRARY unwind)
++  if (LIBDW_LIBRARY AND LIBUNWIND_LIBRARY)
++    set(BACKWARD_LIBS ${LIBDW_LIBRARY} ${LIBUNWIND_LIBRARY})
++    message(STATUS "backward-cpp: using libdw (${LIBDW_LIBRARY}) and libunwind (${LIBUNWIND_LIBRARY}) for stack traces with line numbers")
++  else()
++    message(WARNING "backward-cpp: libdw or libunwind not found, stack traces may lack line numbers")
++    set(BACKWARD_LIBS "")
++  endif()
++else()
++  # On macOS, backward-cpp uses different mechanisms
++  set(BACKWARD_LIBS "")
++endif()
++
++# Note: Removed absl::failure_signal_handler - now using backward-cpp for crash handling
+ cxx_link(base ${LOG_LIBS} absl::flags_parse 
+-    absl::strings absl::symbolize absl::time absl::failure_signal_handler 
+-    TRDP::xxhash TRDP::expected)
++    absl::strings absl::symbolize absl::time
++    TRDP::xxhash TRDP::expected ${BACKWARD_LIBS})
+ 
+ # Define default gtest_main for tests.
+ add_library(gtest_main_ext gtest_main.cc)

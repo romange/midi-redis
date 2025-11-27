@@ -1,0 +1,189 @@
+diff --git a/base/CMakeLists.txt b/base/CMakeLists.txt
+index 162d149..37614a0 100644
+--- a/base/CMakeLists.txt
++++ b/base/CMakeLists.txt
+@@ -1,6 +1,9 @@
+ add_library(base cpu_features.cc hash.cc histogram.cc init.cc logging.cc proc_util.cc
+     pthread_utils.cc varz_node.cc cuckoo_map.cc io_buf.cc segment_pool.cc)
+ 
++# Add include path for backward-cpp header (located in main repo's third_party)
++target_include_directories(base PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/../..)
++
+ if (LEGACY_GLOG) 
+   set(LOG_LIBS glog::glog)
+ else()
+@@ -10,9 +13,27 @@ else()
+       absl::log_initialize)
+ endif()
+ 
++# backward-cpp requires libdw (for DWARF debug info) and libunwind for stack traces
++# with line numbers. We find and link these libraries on Linux.
++if (NOT APPLE)
++  find_library(LIBDW_LIBRARY dw)
++  find_library(LIBUNWIND_LIBRARY unwind)
++  if (LIBDW_LIBRARY AND LIBUNWIND_LIBRARY)
++    set(BACKWARD_LIBS ${LIBDW_LIBRARY} ${LIBUNWIND_LIBRARY})
++    message(STATUS "backward-cpp: using libdw (${LIBDW_LIBRARY}) and libunwind (${LIBUNWIND_LIBRARY}) for stack traces with line numbers")
++  else()
++    message(WARNING "backward-cpp: libdw or libunwind not found, stack traces may lack line numbers")
++    set(BACKWARD_LIBS "")
++  endif()
++else()
++  # On macOS, backward-cpp uses different mechanisms
++  set(BACKWARD_LIBS "")
++endif()
++
++# Note: Removed absl::failure_signal_handler - now using backward-cpp for crash handling
+ cxx_link(base ${LOG_LIBS} absl::flags_parse 
+-    absl::strings absl::symbolize absl::time absl::failure_signal_handler 
+-    TRDP::xxhash TRDP::expected)
++    absl::strings absl::symbolize absl::time
++    TRDP::xxhash TRDP::expected ${BACKWARD_LIBS})
+ 
+ # Define default gtest_main for tests.
+ add_library(gtest_main_ext gtest_main.cc)
+diff --git a/base/init.cc b/base/init.cc
+index 0cf4523..32cd954 100644
+--- a/base/init.cc
++++ b/base/init.cc
+@@ -9,7 +9,6 @@
+ #endif
+ 
+ #include <absl/base/internal/cycleclock.h>
+-#include <absl/debugging/failure_signal_handler.h>
+ #include <absl/debugging/symbolize.h>
+ #include <absl/flags/parse.h>
+ 
+@@ -19,6 +18,23 @@
+ #include "base/cycle_clock.h"
+ #include "base/logging.h"
+ 
++// Use backward-cpp for stack traces with line numbers.
++// backward-cpp requires one of the following backends:
++// - libunwind + libdw (DWARF debug info) - best for line numbers
++// - libunwind + libbfd (BFD) - alternative
++// We use libdw as it provides the best debugging experience.
++#define BACKWARD_HAS_UNWIND 1
++#define BACKWARD_HAS_DW 1
++#include "third_party/backward-cpp/backward.hpp"
++
++namespace {
++
++// Global backward-cpp signal handling - provides stack traces with line numbers
++// for SIGSEGV, SIGABRT, SIGFPE, SIGILL, SIGBUS, and SIGTERM.
++backward::SignalHandling g_signal_handling;
++
++}  // namespace
++
+ // This overrides glibc's default assert handler in debug builds so
+ // we can get a stack trace.
+ #ifndef NDEBUG
+@@ -117,8 +133,8 @@ MainInitGuard::MainInitGuard(int* argc, char*** argv, uint32_t flags) {
+   }
+ #endif
+   absl::InitializeSymbolizer((*argv)[0]);
+-  absl::FailureSignalHandlerOptions options;
+-  absl::InstallFailureSignalHandler(options);
++  // backward-cpp signal handler is initialized globally via g_signal_handling.
++  // It provides stack traces with line numbers using libunwind + libdw.
+ 
+   base::kProgramName = (*argv)[0];
+   base::CycleClock::InitOnce();
+diff --git a/util/fibers/CMakeLists.txt b/util/fibers/CMakeLists.txt
+index 86a1564..a061df2 100644
+--- a/util/fibers/CMakeLists.txt
++++ b/util/fibers/CMakeLists.txt
+@@ -14,6 +14,9 @@ add_library(fibers2 fibers.cc proactor_base.cc synchronization.cc
+             sliding_counter.cc varz.cc fiberqueue_threadpool.cc dns_resolve.cc
+             ${FB_LINUX_SRCS})
+ 
++# Add include path for backward-cpp header used in stacktrace.cc
++target_include_directories(fibers2 PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/../..)
++
+ cxx_link(fibers2 base io ${FB_LINUX_LIBS} Boost::context Boost::headers TRDP::cares)
+ 
+ cxx_test(fibers_test fibers2 LABELS CI)
+diff --git a/util/fibers/stacktrace.cc b/util/fibers/stacktrace.cc
+index 16157c1..00a5e6c 100644
+--- a/util/fibers/stacktrace.cc
++++ b/util/fibers/stacktrace.cc
+@@ -4,32 +4,60 @@
+ 
+ #include "util/fibers/stacktrace.h"
+ 
+-#include "absl/debugging/stacktrace.h"
+-#include "absl/debugging/symbolize.h"
+-#include "absl/strings/str_format.h"
++#include <sstream>
++
++// Use backward-cpp for stack traces with line numbers.
++#define BACKWARD_HAS_UNWIND 1
++#define BACKWARD_HAS_DW 1
++#include "third_party/backward-cpp/backward.hpp"
+ 
+ #ifdef NDEBUG
+-#define SKIP_COUNT_TOP 2
+-#define SKIP_COUNT_BOTTOM 2
++#define SKIP_COUNT 2
+ #else
+-#define SKIP_COUNT_TOP 5
+-#define SKIP_COUNT_BOTTOM 5
++#define SKIP_COUNT 5
+ #endif
+ 
+ std::string util::fb2::GetStacktrace() {
+-  void* addresses[20];
+-  int size = absl::GetStackTrace(addresses, sizeof(addresses) / sizeof(void*),
+-                                 /*skip_count=*/SKIP_COUNT_TOP);
+-
+-  std::string rv;
+-  for (int i = 0; i < size - SKIP_COUNT_BOTTOM; i++) {
+-    char symbol_buf[1024];
+-    const char* symbol = "(unknown)";
+-    if (absl::Symbolize(addresses[i], symbol_buf, sizeof(symbol_buf))) {
+-      symbol = symbol_buf;
++  backward::StackTrace st;
++  st.load_here(32);
++
++  // Skip internal frames
++  st.skip_n_firsts(SKIP_COUNT);
++
++  backward::TraceResolver resolver;
++  resolver.load_stacktrace(st);
++
++  std::ostringstream oss;
++  for (size_t i = 0; i < st.size(); ++i) {
++    backward::ResolvedTrace trace = resolver.resolve(st[i]);
++
++    oss << "#" << i << " " << trace.addr;
++    if (!trace.object_filename.empty()) {
++      oss << " in " << trace.object_filename;
++    }
++    if (!trace.object_function.empty()) {
++      oss << " " << trace.object_function;
++    }
++
++    // Print source location if available (this is the key improvement over abseil)
++    if (!trace.source.filename.empty()) {
++      oss << " at " << trace.source.filename << ":" << trace.source.line;
++      if (!trace.source.function.empty()) {
++        oss << " in " << trace.source.function;
++      }
++    }
++    oss << "\n";
++
++    // Print inlined calls if any
++    for (size_t j = 0; j < trace.inliners.size(); ++j) {
++      const backward::ResolvedTrace::SourceLoc& inliner = trace.inliners[j];
++      oss << "    (inlined) " << inliner.filename << ":" << inliner.line;
++      if (!inliner.function.empty()) {
++        oss << " in " << inliner.function;
++      }
++      oss << "\n";
+     }
+-    rv += absl::StrFormat("%p  %s\n", addresses[i], symbol);
+   }
+ 
+-  return rv;
++  return oss.str();
+ }

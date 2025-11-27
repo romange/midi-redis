@@ -1,0 +1,47 @@
+diff --git a/base/init.cc b/base/init.cc
+index 0cf4523..32cd954 100644
+--- a/base/init.cc
++++ b/base/init.cc
+@@ -9,7 +9,6 @@
+ #endif
+ 
+ #include <absl/base/internal/cycleclock.h>
+-#include <absl/debugging/failure_signal_handler.h>
+ #include <absl/debugging/symbolize.h>
+ #include <absl/flags/parse.h>
+ 
+@@ -19,6 +18,23 @@
+ #include "base/cycle_clock.h"
+ #include "base/logging.h"
+ 
++// Use backward-cpp for stack traces with line numbers.
++// backward-cpp requires one of the following backends:
++// - libunwind + libdw (DWARF debug info) - best for line numbers
++// - libunwind + libbfd (BFD) - alternative
++// We use libdw as it provides the best debugging experience.
++#define BACKWARD_HAS_UNWIND 1
++#define BACKWARD_HAS_DW 1
++#include "third_party/backward-cpp/backward.hpp"
++
++namespace {
++
++// Global backward-cpp signal handling - provides stack traces with line numbers
++// for SIGSEGV, SIGABRT, SIGFPE, SIGILL, SIGBUS, and SIGTERM.
++backward::SignalHandling g_signal_handling;
++
++}  // namespace
++
+ // This overrides glibc's default assert handler in debug builds so
+ // we can get a stack trace.
+ #ifndef NDEBUG
+@@ -117,8 +133,8 @@ MainInitGuard::MainInitGuard(int* argc, char*** argv, uint32_t flags) {
+   }
+ #endif
+   absl::InitializeSymbolizer((*argv)[0]);
+-  absl::FailureSignalHandlerOptions options;
+-  absl::InstallFailureSignalHandler(options);
++  // backward-cpp signal handler is initialized globally via g_signal_handling.
++  // It provides stack traces with line numbers using libunwind + libdw.
+ 
+   base::kProgramName = (*argv)[0];
+   base::CycleClock::InitOnce();

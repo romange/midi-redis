@@ -2,7 +2,9 @@ build/*
 build-*
 .vscode/*.db
 .vscode/settings.json
-third_party
+third_party/*
+!third_party/backward-cpp
+!third_party/backward-cpp/**
 genfiles/*
 *.sublime-*
 .tags
@@ -10,3 +12,4 @@ genfiles/*
 *.pyc
 /CMakeLists.txt.user
 _deps
+_codeql_build_dir
