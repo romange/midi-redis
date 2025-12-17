@@ -42,15 +42,13 @@ void BaseSerializer::Send(const iovec* v, uint32_t len) {
   }
 
   error_code ec;
-  auto* fb = static_cast<util::FiberSocketBase*>(sink_);
   ssize_t total_len = batch_.size();
   for (unsigned i = 0; i < len; ++i) {
     total_len += v[i].iov_len;
   }
   if (batch_.empty()) {
-    // ec = sink_->Write(v, len);
-    ssize_t res = fb->RawSend(v, len);
-    CHECK_EQ(res, total_len) << "TBD: handle partial writes/errors";
+    DVLOG(1) << "Sending direct to stream " << sink_;
+    ec = sink_->Write(v, len);
   } else {
     DVLOG(1) << "Sending batch to stream " << sink_ << "\n" << batch_;
 
@@ -58,9 +56,7 @@ void BaseSerializer::Send(const iovec* v, uint32_t len) {
     tmp[0].iov_base = batch_.data();
     tmp[0].iov_len = batch_.size();
     copy(v, v + len, tmp + 1);
-
-    ssize_t res = fb->RawSend(tmp, len + 1);
-    CHECK_EQ(res, total_len) << "TBD: handle partial writes/errors";
+    ec = sink_->Write(tmp, len + 1);
     batch_.clear();
   }
 

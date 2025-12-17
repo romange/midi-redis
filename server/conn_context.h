@@ -134,7 +134,7 @@ class ConnectionContext {
 
   void ReplyReadyCommands();
 
-  bool CheckIfCanReply(ParsedCommand* cmd);
+  bool CheckIfCanReply(ParsedCommand* head, bool peek_only = false);
 
  private:
   Connection* owner_;

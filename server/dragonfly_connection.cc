@@ -58,6 +58,9 @@ void RespToArgList(const RespVec& src, CmdArgVec* dest) {
 }
 #endif
 constexpr size_t kMinReadSize = 256;
+// 64KB safety limit for the input buffer to prevent memory exhaustion
+// while matching standard TCP window sizes.
+constexpr size_t kMaxReadBufferSize = 65536;
 
 }  // namespace
 
@@ -91,19 +94,20 @@ void Connection::HandleRequests() {
 
   auto ep = lsb->RemoteEndpoint();
 
-  std::unique_ptr<tls::TlsSocket> tls_sock;
   if (ctx_) {
-    tls_sock.reset(new tls::TlsSocket(socket_.get()));
+    std::unique_ptr<tls::TlsSocket> tls_sock{std::make_unique<tls::TlsSocket>(std::move(socket_))};
     tls_sock->InitSSL(ctx_);
 
     FiberSocketBase::AcceptResult aresult = tls_sock->Accept();
     if (!aresult) {
       LOG(WARNING) << "Error handshaking " << aresult.error().message();
+      tls_sock->Close();
       return;
     }
     VLOG(1) << "TLS handshake succeeded";
+    socket_ = std::move(tls_sock);
   }
-  FiberSocketBase* peer = tls_sock ? (FiberSocketBase*)tls_sock.get() : socket_.get();
+  FiberSocketBase* peer{socket_.get()};
   cc_.reset(new ConnectionContext(peer, this));
   cc_->shard_set = &service_->shard_set();
 
@@ -112,24 +116,36 @@ void Connection::HandleRequests() {
   VLOG(1) << "Closed connection for peer " << ep;
 }
 
-bool Connection::DoRead(int fd, const util::FiberSocketBase::RecvNotification& rn,
-                        base::IoBuf* io_buf) {
-  DVLOG(1) << "DoRead called for fd " << fd;
-  if (std::holds_alternative<monostate>(rn.read_result)) {
+bool Connection::DoRead(util::FiberSocketBase* peer,
+                        const util::FiberSocketBase::RecvNotification& rn, base::IoBuf* io_buf) {
+  DVLOG(1) << "DoRead called for fd " << peer->native_handle();
+  if (std::holds_alternative<util::FiberSocketBase::RecvNotification::RecvCompletion>(
+          rn.read_result)) {
     auto buf = io_buf->AppendBuffer();
     if (buf.empty()) {
       return true;
     }
-    int res = recv(fd, buf.data(), buf.size(), 0);
+    auto res = peer->TryRecv(buf);
     bool more = false;
-    DVLOG(1) << "Read " << res << " bytes from fd " << fd;
-    if (res > 0) {
-      io_buf->CommitWrite(res);
-      more = (size_t(res) == buf.size());
-    } else if (res == 0) {
+    if (res && (*res > 0)) {
+      size_t bytes_received = *res;
+      DVLOG(1) << "Read " << bytes_received << " bytes from fd " << peer->native_handle();
+      io_buf->CommitWrite(bytes_received);
+      more = (bytes_received == buf.size());
+    } else if (res && (*res == 0)) {
+      // EOF / Connection Closed cleanly
       ec_ = make_error_code(std::errc::connection_reset);
-    } else if (errno != EAGAIN && errno != EWOULDBLOCK) {
-      ec_ = std::error_code(errno, std::system_category());
+    } else {
+      std::error_code ec = res.error();
+      if (ec == std::errc::resource_unavailable_try_again ||
+          ec == std::errc::operation_would_block) {
+        // The socket is temporarily busy (e.g. TLS lock or Empty). We act as if there is "more"
+        // work to do so the loop doesn't abort or treat this as a fatal error.
+        more = true;
+      } else {
+        // Genuine Fatal Error
+        ec_ = ec;
+      }
     }
 
     // epoll notification.
@@ -142,9 +158,8 @@ bool Connection::DoRead(int fd, const util::FiberSocketBase::RecvNotification& r
     // TODO: parse directly from buf without copy.
     // Can be done if we ensure that parsing fully consumes the input buffer.
     io_buf->WriteAndCommit(buf.data(), buf.size());
-  } else {
-    int err = std::get<int>(rn.read_result);
-    if (err == 0) {
+  } else if (auto err = std::get_if<std::error_code>(&rn.read_result)) {
+    if (err->value() == 0) {
       ec_ = make_error_code(std::errc::connection_reset);
     } else if (errno != EAGAIN && errno != EWOULDBLOCK) {
       ec_ = std::error_code(errno, std::system_category());
@@ -157,8 +172,6 @@ bool Connection::DoRead(int fd, const util::FiberSocketBase::RecvNotification& r
 
 void Connection::InputLoop(FiberSocketBase* peer) {
   base::IoBuf io_buf{kMinReadSize};
-  int fd = peer->native_handle();
-  bool increase_buf = false;
   bool sock_might_have_data = true;
 
 #ifdef __linux__
@@ -173,18 +186,23 @@ void Connection::InputLoop(FiberSocketBase* peer) {
     }
   }
 #endif
-  peer->RegisterOnRecv([&, fd](const FiberSocketBase::RecvNotification& rn) {
-    sock_might_have_data = DoRead(fd, rn, &io_buf);
-    if (io_buf.AppendLen() == 0 && io_buf.Capacity() < 65536)
-      increase_buf = true;
+  peer->RegisterOnRecv([&, peer](const FiberSocketBase::RecvNotification& rn) {
+    sock_might_have_data = DoRead(peer, rn, &io_buf);
   });
 
   // auto dispatch_fb = fb2::Fiber(fb2::Launch::dispatch, [&] { DispatchFiber(peer); });
   ParserStatus status = OK;
   unsigned min_parse_threshold = 0;
   do {
+    // If we have very little space left to append, grow the buffer.
+    // This handles the case where we have partial data (221 bytes)
+    // but need to read more to satisfy the parser.
+    if ((io_buf.AppendLen() < kMinReadSize) && (io_buf.Capacity() < kMaxReadBufferSize)) {
+      io_buf.EnsureCapacity(io_buf.Capacity() * 2);
+    }
+
     if (sock_might_have_data && io_buf.InputLen() <= min_parse_threshold) {
-      sock_might_have_data = DoRead(fd, FiberSocketBase::RecvNotification{}, &io_buf);
+      sock_might_have_data = DoRead(peer, FiberSocketBase::RecvNotification{}, &io_buf);
     }
 
     VLOG(1) << "before await, append len=" << io_buf.AppendLen()
@@ -226,17 +244,15 @@ void Connection::InputLoop(FiberSocketBase* peer) {
     // important: we record the watermark now before we preempt and possibly
     // increase io_buf further.
     min_parse_threshold = io_buf.InputLen();
-    if (increase_buf) {
-      io_buf.EnsureCapacity(io_buf.Capacity() * 2);
-      increase_buf = false;
-    }
 
     while (cc_->to_execute) {
       auto* cmd = cc_->to_execute;
       if (cmd->parse_complete == 0) {
         break;
       }
-      bool batch_mode = cmd->next != nullptr && cmd->next->parse_complete;
+      // Enable batch mode if the next command is ready, so replies are buffered for pipelining.
+      bool batch_mode =
+          cmd->next && cmd->next->parse_complete && cc_->CheckIfCanReply(cmd->next, true);
       cc_->SetBatchMode(batch_mode);
       service_->DispatchCommand(CmdArgList{}, cc_.get());
       cc_->to_execute = cmd->next;

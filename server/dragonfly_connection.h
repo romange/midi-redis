@@ -55,7 +55,7 @@ class Connection : public util::Connection {
   ParserStatus ParseMultiBulk(base::IoBuf* buf);
 
   // Returns true if socket might have more data to read.
-  bool DoRead(int fd, const util::FiberSocketBase::RecvNotification& rn, base::IoBuf* io_buf);
+  bool DoRead(util::FiberSocketBase* peer, const util::FiberSocketBase::RecvNotification& rn, base::IoBuf* io_buf);
 
   std::unique_ptr<RedisParser> redis_parser_;
   std::unique_ptr<MemcacheParser> memcache_parser_;

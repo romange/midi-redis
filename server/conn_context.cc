@@ -80,6 +80,7 @@ void ConnectionContext::SendGetNotFound(ParsedCommand* cmd) {
 void ConnectionContext::ReplyReadyCommands() {
   while (parsed_head != to_execute) {
     auto* cmd = parsed_head;
+    // peek_only = false since we want to claim ownership of the cmd to send its reply immediately.
     if (!CheckIfCanReply(cmd)) {
       break;
     }
@@ -91,7 +92,9 @@ void ConnectionContext::ReplyReadyCommands() {
     auto* next = cmd->next;
     delete cmd;
     parsed_head = next;
-    bool batch_mode = (next != nullptr && next->dispatched);
+    // Look-ahead check: peek_only=true. We just want to know if we should batch,
+    // we do NOT want to claim ownership of the next reply yet.
+    bool batch_mode = (next && next->dispatched && CheckIfCanReply(next, true));
     SetBatchMode(batch_mode);
 
     if (std::holds_alternative<ParsedCommand::ErrorString>(resp)) {
@@ -105,17 +108,28 @@ void ConnectionContext::ReplyReadyCommands() {
     } else {
       // Skip monostate.
     }
-
   }
 }
 
-bool ConnectionContext::CheckIfCanReply(ParsedCommand* head) {
+bool ConnectionContext::CheckIfCanReply(ParsedCommand* head, bool peek_only) {
   DCHECK(head);
-  DCHECK(head->parse_complete);
+  if (head->parse_complete == 0)
+    return false;
   if (!head->execute_async)
     return true;
 
   uint8_t state = head->state.load(std::memory_order_relaxed);
+
+  // If the command is already done, we can always reply (peek or not).
+  if (state & ParsedCommand::EXECUTE_DONE) {
+    return true;
+  }
+
+  // If we are only peeking and it's not done, return false, do not set HEAD_REPLY (avoiding the
+  // side effect).
+  if (peek_only) {
+    return false;
+  }
 
   while ((state & ParsedCommand::EXECUTE_DONE) == 0) {
     if (state & ParsedCommand::HEAD_REPLY) {
