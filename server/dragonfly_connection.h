@@ -48,7 +48,6 @@ class Connection : public util::Connection {
   void HandleRequests() final;
 
   void InputLoop(util::FiberSocketBase* peer);
-  //wvoid DispatchFiber(util::FiberSocketBase* peer);
 
   ParserStatus ParseRedis(base::IoBuf* buf);
   ParserStatus ParseMemcache(base::IoBuf* buf);

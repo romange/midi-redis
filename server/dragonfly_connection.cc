@@ -95,7 +95,8 @@ void Connection::HandleRequests() {
   auto ep = lsb->RemoteEndpoint();
 
   if (ctx_) {
-    std::unique_ptr<tls::TlsSocket> tls_sock{std::make_unique<tls::TlsSocket>(std::move(socket_))};
+    std::unique_ptr<tls::TlsSocket> tls_sock = std::make_unique<tls::TlsSocket>(std::move(socket_));
+
     tls_sock->InitSSL(ctx_);
 
     FiberSocketBase::AcceptResult aresult = tls_sock->Accept();
@@ -161,8 +162,9 @@ bool Connection::DoRead(util::FiberSocketBase* peer,
   } else if (auto err = std::get_if<std::error_code>(&rn.read_result)) {
     if (err->value() == 0) {
       ec_ = make_error_code(std::errc::connection_reset);
-    } else if (errno != EAGAIN && errno != EWOULDBLOCK) {
-      ec_ = std::error_code(errno, std::system_category());
+    } else if (*err != std::errc::resource_unavailable_try_again &&
+               *err != std::errc::operation_would_block) {
+      ec_ = *err;
     }
   }
 

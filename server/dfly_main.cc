@@ -118,7 +118,7 @@ int main(int argc, char* argv[]) {
     pp.reset(fb2::Pool::IOUring(1024, 0));  // 1024 - iouring queue size.
   }
 #else
-  pool.reset(fb2::Pool::Epoll(max_available_threads));
+  pp.reset(fb2::Pool::Epoll(max_available_threads));
 #endif
 
   pp->Run();
