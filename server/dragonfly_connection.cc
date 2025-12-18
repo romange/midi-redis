@@ -119,6 +119,7 @@ void Connection::HandleRequests() {
 
 bool Connection::DoRead(util::FiberSocketBase* peer,
                         const util::FiberSocketBase::RecvNotification& rn, base::IoBuf* io_buf) {
+  bool read_more{false};
   DVLOG(1) << "DoRead called for fd " << peer->native_handle();
   if (std::holds_alternative<util::FiberSocketBase::RecvNotification::RecvCompletion>(
           rn.read_result)) {
@@ -127,12 +128,11 @@ bool Connection::DoRead(util::FiberSocketBase* peer,
       return true;
     }
     auto res = peer->TryRecv(buf);
-    bool more = false;
     if (res && (*res > 0)) {
       size_t bytes_received = *res;
       DVLOG(1) << "Read " << bytes_received << " bytes from fd " << peer->native_handle();
       io_buf->CommitWrite(bytes_received);
-      more = (bytes_received == buf.size());
+      read_more = (bytes_received == buf.size());
     } else if (res && (*res == 0)) {
       // EOF / Connection Closed cleanly
       ec_ = make_error_code(std::errc::connection_reset);
@@ -142,7 +142,7 @@ bool Connection::DoRead(util::FiberSocketBase* peer,
           ec == std::errc::operation_would_block) {
         // The socket is temporarily busy (e.g. TLS lock or Empty). We act as if there is "more"
         // work to do so the loop doesn't abort or treat this as a fatal error.
-        more = true;
+        read_more = true;
       } else {
         // Genuine Fatal Error
         ec_ = ec;
@@ -151,7 +151,7 @@ bool Connection::DoRead(util::FiberSocketBase* peer,
 
     // epoll notification.
     evc_.notify();
-    return more;
+    return read_more;
   }
 
   if (std::holds_alternative<io::MutableBytes>(rn.read_result)) {
@@ -160,16 +160,16 @@ bool Connection::DoRead(util::FiberSocketBase* peer,
     // Can be done if we ensure that parsing fully consumes the input buffer.
     io_buf->WriteAndCommit(buf.data(), buf.size());
   } else if (auto err = std::get_if<std::error_code>(&rn.read_result)) {
-    if (err->value() == 0) {
-      ec_ = make_error_code(std::errc::connection_reset);
-    } else if (*err != std::errc::resource_unavailable_try_again &&
-               *err != std::errc::operation_would_block) {
+    if (*err == std::errc::resource_unavailable_try_again ||
+        *err == std::errc::operation_would_block) {
+      read_more = true;
+    } else {
       ec_ = *err;
     }
   }
 
   evc_.notify();
-  return false;
+  return read_more;
 }
 
 void Connection::InputLoop(FiberSocketBase* peer) {
@@ -196,9 +196,8 @@ void Connection::InputLoop(FiberSocketBase* peer) {
   ParserStatus status = OK;
   unsigned min_parse_threshold = 0;
   do {
-    // If we have very little space left to append, grow the buffer.
-    // This handles the case where we have partial data (221 bytes)
-    // but need to read more to satisfy the parser.
+    // If we have very little space left to append, grow the buffer. This handles the case where we
+    // have partial data but need to read more to satisfy the parser.
     if ((io_buf.AppendLen() < kMinReadSize) && (io_buf.Capacity() < kMaxReadBufferSize)) {
       io_buf.EnsureCapacity(io_buf.Capacity() * 2);
     }
