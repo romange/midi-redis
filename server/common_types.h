@@ -12,6 +12,8 @@
 #include <string_view>
 #include <vector>
 
+typedef char* sds;
+
 namespace dfly {
 
 using DbIndex = uint16_t;
@@ -68,6 +70,12 @@ inline MutableStrSpan ToMSS(absl::Span<uint8_t> span) {
 }
 
 std::string WrongNumArgsError(std::string_view cmd);
+
+// Constants for socket bufring.
+constexpr uint16_t kRecvSockGid = 1;
+
+// Size of the buffer in bufring (kRecvSockGid).
+constexpr size_t kRecvBufSize = 256;
 
 }  // namespace dfly
 

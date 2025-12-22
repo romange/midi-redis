@@ -8,7 +8,7 @@ add_library(dragonfly_lib command_registry.cc common_types.cc config_flags.cc
             redis_parser.cc resp_expr.cc reply_builder.cc)
 
 cxx_link(dragonfly_lib 
-         fibers2 strings_lib http_server_lib tls_lib)
+         fibers2 strings_lib http_server_lib tls_lib redis_dict)
 
 add_library(dfly_test_lib test_utils.cc)
 cxx_link(dfly_test_lib dragonfly_lib gtest_main_ext)

@@ -14,6 +14,7 @@
 #include "server/resp_expr.h"
 #include "util/connection.h"
 #include "util/fibers/synchronization.h"
+#include "util/fiber_socket_base.h"
 
 typedef struct ssl_ctx_st SSL_CTX;
 
@@ -35,6 +36,9 @@ class Connection : public util::Connection {
     return protocol_;
   }
 
+  void Notify() {
+    evc_.notify();
+  }
  protected:
   void OnShutdown() override;
 
@@ -44,10 +48,13 @@ class Connection : public util::Connection {
   void HandleRequests() final;
 
   void InputLoop(util::FiberSocketBase* peer);
-  void DispatchFiber(util::FiberSocketBase* peer);
 
   ParserStatus ParseRedis(base::IoBuf* buf);
   ParserStatus ParseMemcache(base::IoBuf* buf);
+  ParserStatus ParseMultiBulk(base::IoBuf* buf);
+
+  // Returns true if socket might have more data to read.
+  bool DoRead(util::FiberSocketBase* peer, const util::FiberSocketBase::RecvNotification& rn, base::IoBuf* io_buf);
 
   std::unique_ptr<RedisParser> redis_parser_;
   std::unique_ptr<MemcacheParser> memcache_parser_;
@@ -64,12 +71,21 @@ class Connection : public util::Connection {
     Request(const Request&) = delete;
   };
 
-  static Request* FromArgs(RespVec args);
+  // static Request* FromArgs(RespVec args);
 
   std::deque<Request*> dispatch_q_;  // coordinated via evc_.
   util::fb2::EventCount evc_;
   unsigned parser_error_ = 0;
   Protocol protocol_;
+  unsigned multibulk_len_ = 0;
+  long bulk_len_ = -1;  // -1 means we need to read it.
+  std::error_code ec_;
+  std::string parse_stash_;
+  enum ParseState {
+    INIT,
+    PARSE_INLINE,
+    PARSE_MULTIBULK,
+  } state_ = INIT;
 };
 
 }  // namespace dfly
