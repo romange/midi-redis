@@ -198,8 +198,21 @@ void Connection::InputLoop(FiberSocketBase* peer) {
   do {
     // If we have very little space left to append, grow the buffer. This handles the case where we
     // have partial data but need to read more to satisfy the parser.
-    if ((io_buf.AppendLen() < kMinReadSize) && (io_buf.Capacity() < kMaxReadBufferSize)) {
-      io_buf.EnsureCapacity(io_buf.Capacity() * 2);
+    if (io_buf.AppendLen() < kMinReadSize) {
+      if (io_buf.Capacity() < kMaxReadBufferSize) {
+        io_buf.EnsureCapacity(io_buf.Capacity() * 2);
+      } else {
+        // At max capacity: cannot grow further. Compact to reclaim consumed space
+        // so the next DoRead() has room to write incoming socket data.
+        io_buf.Compact();
+        if (io_buf.AppendLen() < kMinReadSize) {
+          // Compact() did not help, buffer is genuinely full of unprocessed data (e.g. a single command larger
+          // than kMaxReadBufferSize). No space can be reclaimed - close the connection.
+          LOG(WARNING) << "Input buffer full with no reclaimable space, closing connection";
+          ec_ = make_error_code(std::errc::no_buffer_space);
+          break;
+        }
+      }
     }
 
     if (sock_might_have_data && io_buf.InputLen() <= min_parse_threshold) {
